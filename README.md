@@ -13,7 +13,7 @@
 | **SWA** | Sliding Window Attention | 局部窗口，高频访问，数据生命周期短 |
 | **CSA** | Context Sparse Attention | 稀疏全局上下文，中频访问 |
 | **HCA** | Hierarchical Context Attention | 层次化上下文，金字塔式访问模式 |
-| **dLLM** | Deep LLM Attention | 深层注意力，长距离依赖，数据生命周期长 |
+| **dLLM** | Diffusion Large Language Model | Diffusion Attention，逐步去噪生成，迭代式推理 |
 
 ## 多级卸载层级
 
