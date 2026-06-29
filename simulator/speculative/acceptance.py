@@ -50,7 +50,9 @@ class AcceptanceModel:
         num_accepted = 0
 
         for i in range(K):
-            abs_position = output_position + i
+            # +1 because the bonus token occupies output_position;
+            # the first draft token is at output_position + 1
+            abs_position = output_position + 1 + i
 
             # Beyond ground truth — cannot verify
             if abs_position >= len(req.ground_truth_output):

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from typing import TYPE_CHECKING, Any
 
 from simulator.config.model_config import KVBackendConfig, VLLMConfig
@@ -19,12 +18,19 @@ class vLLMBackend(KVBackend):
         vllm_cfg = VLLMConfig.from_backend_config(backend_config)
 
         # Lazy imports so this module can be loaded when vllm is not installed
+        from vllm.utils.hashing import sha256
         from vllm.v1.core.kv_cache_manager import KVCacheManager
-        from vllm.v1.core.kv_cache_utils import get_request_block_hasher
+        from vllm.v1.core.kv_cache_utils import (
+            get_request_block_hasher,
+            init_none_hash,
+        )
 
         self._block_size = backend_config.block_size
         self._hash_block_size = backend_config.hash_block_size
         self._scheduler_block_size = backend_config.scheduler_block_size
+
+        # Must be called before any block hashing
+        init_none_hash(sha256)
 
         self._manager = KVCacheManager(
             kv_cache_config=vllm_cfg.kv_cache_config,
@@ -36,7 +42,7 @@ class vLLMBackend(KVBackend):
             enable_kv_cache_events=False,
         )
         self._block_hasher = get_request_block_hasher(
-            self._hash_block_size, hashlib.sha256
+            self._hash_block_size, sha256
         )
 
     # ---- KVBackend interface ----
