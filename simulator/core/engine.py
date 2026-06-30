@@ -5,8 +5,6 @@ from __future__ import annotations
 from simulator.config.model_config import (
     KVBackendConfig,
     ModelArchitecture,
-    SGLangConfig,
-    VLLMConfig,
 )
 from simulator.config.simulator_config import SimulatorConfig
 from simulator.core.request_state import SimRequestState
@@ -31,27 +29,35 @@ class SimulationEngine:
         else:
             self._model_arch = ModelArchitecture.deepseek_v4_flash()
 
-        # Build backend config
-        # For hybrid models, compute scheduler_block_size as LCM of group block sizes,
+        # Build backend config.
+        # For hybrid models, compute scheduler_block_size as LCM of group block sizes
         # and hash_block_size as GCD (required by vLLM assertion).
         import math
 
-        group_block_sizes = [g[1] for g in self._model_arch.layer_groups]  # (name, bs, cr, n_layers)
-        scheduler_block_size = group_block_sizes[0]
-        hash_block_size_val = group_block_sizes[0]
-        for bs in group_block_sizes[1:]:
-            scheduler_block_size = scheduler_block_size * bs // math.gcd(scheduler_block_size, bs)
-            hash_block_size_val = math.gcd(hash_block_size_val, bs)
-        # Use the largest block_size for the "main" config field
-        main_block_size = max(group_block_sizes)
+        if self._model_arch.is_mla and self._model_arch.compress_ratios:
+            group_block_sizes = [g[1] for g in self._model_arch.layer_groups]
+            scheduler_block_size_val = group_block_sizes[0]
+            hash_block_size_val = group_block_sizes[0]
+            for bs in group_block_sizes[1:]:
+                scheduler_block_size_val = (
+                    scheduler_block_size_val * bs // math.gcd(scheduler_block_size_val, bs)
+                )
+                hash_block_size_val = math.gcd(hash_block_size_val, bs)
+            main_block_size = max(group_block_sizes)
+        else:
+            # Non-hybrid: use config values directly
+            main_block_size = config.kv_cache_block_size
+            hash_block_size_val = config.kv_cache_block_size
+            scheduler_block_size_val = config.kv_cache_block_size
 
+        self._main_block_size = main_block_size
         self._backend_config = KVBackendConfig(
             model_arch=self._model_arch,
             block_size=main_block_size,
             hash_block_size=hash_block_size_val,
             max_model_len=config.max_model_len,
             num_kv_cache_blocks=config.num_kv_cache_blocks,
-            scheduler_block_size=scheduler_block_size,
+            scheduler_block_size=scheduler_block_size_val,
             page_size=main_block_size,  # SGLang system page_size
         )
 
@@ -78,7 +84,7 @@ class SimulationEngine:
             f"Backend: {self._backend.name} | "
             f"Model: {self._model_arch.model_type} ({self._model_arch.num_layers} layers) | "
             f"KV Cache: {kv_size_gb:.2f} GB ({self._config.num_kv_cache_blocks} blocks × "
-            f"{self._config.kv_cache_block_size} tokens)"
+            f"{self._main_block_size} tokens)"
         )
         print(
             f"Requests: {self._config.dataset.synthetic.num_requests} | "

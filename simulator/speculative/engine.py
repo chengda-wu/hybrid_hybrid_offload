@@ -40,7 +40,7 @@ class SpeculativeDecodeEngine:
             with length 1 + K (or shorter if we run past ground truth).
         """
         K = self._config.num_spec_tokens
-        if K == 0 and not self._config.enabled:
+        if K == 0 or not self._config.enabled:
             return []
 
         output_pos = len(req.output_token_ids)

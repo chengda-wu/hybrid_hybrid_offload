@@ -51,7 +51,7 @@ class ModelArchitecture:
             self.compress_ratios = [self.compress_ratio] * self.num_layers
 
     @property
-    def layer_groups(self) -> list[tuple[str, int, int]]:
+    def layer_groups(self) -> list[tuple[str, int, int, int]]:
         """Return KV cache layer groups for hybrid models.
 
         Each element is (group_name, block_size, compress_ratio, num_layers).
@@ -67,7 +67,10 @@ class ModelArchitecture:
         For non-hybrid models, returns a single group.
         """
         if not self.is_mla or self.compress_ratios is None:
-            return [("full", self.head_size, 1, self.num_layers)]
+            # Non-hybrid model: single group using the system block_size.
+            # The actual block_size is provided by KVBackendConfig, not here.
+            # Return a placeholder that the engine replaces with the real value.
+            return [("full", 0, 1, self.num_layers)]
 
         ratios = self.compress_ratios
         groups: list[tuple[str, int, int, int]] = []
@@ -165,7 +168,7 @@ class ModelArchitecture:
             dtype="bfloat16",
             kv_lora_rank=512,
             qk_rope_head_dim=64,
-            compress_ratio=8,  # representative (most common non-zero is 4 or 128)
+            compress_ratio=4,  # representative (19 C4 layers)
             compress_ratios=compress_ratios,
             sliding_window=128,
             vocab_size=129280,

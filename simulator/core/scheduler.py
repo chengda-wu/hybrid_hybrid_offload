@@ -72,8 +72,6 @@ class SimulatorScheduler:
         for req in list(self._running.values()):
             if req.is_finished:
                 continue
-            # Snapshot before handler
-            num_computed_before = req.num_computed_tokens
 
             if req.status == RequestStatus.PRE_FILL:
                 loaded, computed, accepted = self._handle_prefill(req)
