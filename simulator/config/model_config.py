@@ -101,7 +101,7 @@ class ModelArchitecture:
         """Hardcoded defaults for DeepSeek V4 Flash (FP8)."""
         return cls(
             model_type="deepseek_v4",
-            num_layers=61,
+            num_layers=43,
             num_kv_heads=1,
             num_attention_heads=128,
             head_size=512,  # qk_nope_head_dim=448 + qk_rope_head_dim=64 for V4 Flash

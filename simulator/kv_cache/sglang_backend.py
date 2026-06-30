@@ -79,6 +79,7 @@ class SGLangBackend(KVBackend):
     def __init__(self, backend_config: KVBackendConfig):
         sglang_cfg = SGLangConfig.from_backend_config(backend_config)
 
+        self._backend_config = backend_config
         self._page_size = sglang_cfg.page_size
         self._total_tokens = sglang_cfg.total_tokens
         self._mock_allocator = MockTokenToKVPoolAllocator(self._total_tokens)
@@ -194,6 +195,17 @@ class SGLangBackend(KVBackend):
     @property
     def total_blocks(self) -> int:
         return self._total_tokens
+
+    @property
+    def total_bytes(self) -> int:
+        """Estimate from model architecture and total token slots."""
+        arch = self._backend_config.model_arch
+        if arch.is_mla:
+            per_token = 584  # fp8_ds_mla
+        else:
+            dtype_size = 2  # bf16
+            per_token = 2 * arch.num_kv_heads * arch.head_size * dtype_size
+        return self._total_tokens * per_token * arch.num_layers
 
     @property
     def name(self) -> str:

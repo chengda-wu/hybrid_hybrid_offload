@@ -117,6 +117,12 @@ class vLLMBackend(KVBackend):
         return self._manager.kv_cache_config.num_blocks
 
     @property
+    def total_bytes(self) -> int:
+        """Sum of all kv_cache_tensor sizes — the real allocation including
+        vLLM's block padding and hybrid group layout."""
+        return sum(t.size for t in self._manager.kv_cache_config.kv_cache_tensors)
+
+    @property
     def name(self) -> str:
         return "vllm"
 

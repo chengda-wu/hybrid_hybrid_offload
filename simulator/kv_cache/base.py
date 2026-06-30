@@ -75,6 +75,12 @@ class KVBackend(ABC):
 
     @property
     @abstractmethod
+    def total_bytes(self) -> int:
+        """Total KV cache size in bytes (actual allocation)."""
+        ...
+
+    @property
+    @abstractmethod
     def name(self) -> str:
         """Human-readable backend name ('vllm' or 'sglang')."""
         ...
