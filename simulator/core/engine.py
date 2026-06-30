@@ -52,7 +52,7 @@ class SimulationEngine:
             max_model_len=config.max_model_len,
             num_kv_cache_blocks=config.num_kv_cache_blocks,
             scheduler_block_size=scheduler_block_size,
-            page_size=1,  # SGLang token-level
+            page_size=main_block_size,  # SGLang system page_size
         )
 
         # Build components

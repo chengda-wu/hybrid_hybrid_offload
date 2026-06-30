@@ -399,7 +399,30 @@ class SGLangConfig:
 
     @classmethod
     def from_backend_config(cls, bc: KVBackendConfig) -> "SGLangConfig":
-        """Build SGLang config from the common backend config."""
-        # SGLang uses token-level granularity: total_tokens = blocks * block_size
-        total_tokens = bc.num_kv_cache_blocks * bc.block_size
-        return cls(page_size=bc.page_size, total_tokens=total_tokens)
+        """Build SGLang config from the common backend config.
+
+        For DeepSeek V4 in SGLang:
+        - System page_size = block_size (256), used by RadixCache for prefix
+          matching alignment (matches rounded down to page boundaries).
+        - Three internal pools: SWA (page=64), C4 (page=64), C128 (page=2).
+        - Total token slots = blocks * block_size across all pools.
+        """
+        arch = bc.model_arch
+
+        # SGLang RadixCache page_size = system page size
+        page_size = bc.block_size
+
+        # Compute total tokens slots across hybrid groups
+        if arch.is_mla and arch.compress_ratios is not None:
+            # For hybrid models, each group contributes its own pages
+            total_tokens = 0
+            for _name, grp_block_size, compress_ratio in arch.layer_groups:
+                n_layers = sum(
+                    1 for cr in arch.compress_ratios if cr == compress_ratio
+                )
+                storage = grp_block_size // max(compress_ratio, 1)
+                total_tokens += n_layers * bc.num_kv_cache_blocks * storage
+        else:
+            total_tokens = bc.num_kv_cache_blocks * bc.block_size * arch.num_layers
+
+        return cls(page_size=page_size, total_tokens=total_tokens)

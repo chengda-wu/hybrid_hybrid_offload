@@ -81,8 +81,12 @@ class SGLangBackend(KVBackend):
 
         self._backend_config = backend_config
         self._page_size = sglang_cfg.page_size
-        self._total_tokens = sglang_cfg.total_tokens
-        self._mock_allocator = MockTokenToKVPoolAllocator(self._total_tokens)
+
+        # Single flat token pool for simulation.  The real SGLang uses three
+        # separate pools (SWA ring buffer, C4 pages, C128 pages) but RadixCache
+        # prefix matching is content-addressed and independent of pool layout.
+        # The total token count accounts for the combined space.
+        self._mock_allocator = MockTokenToKVPoolAllocator(sglang_cfg.total_tokens)
 
         from sglang.srt.mem_cache.radix_cache import RadixCache
 
@@ -185,8 +189,9 @@ class SGLangBackend(KVBackend):
 
     @property
     def usage(self) -> float:
-        num_used = self._total_tokens - self._mock_allocator.available_size()
-        return num_used / self._total_tokens if self._total_tokens > 0 else 0.0
+        total = self._mock_allocator._total
+        num_free = self._mock_allocator.available_size()
+        return (total - num_free) / total if total > 0 else 0.0
 
     @property
     def num_free_blocks(self) -> int:
@@ -194,18 +199,25 @@ class SGLangBackend(KVBackend):
 
     @property
     def total_blocks(self) -> int:
-        return self._total_tokens
+        return self._mock_allocator._total
 
     @property
     def total_bytes(self) -> int:
-        """Estimate from model architecture and total token slots."""
+        """Total KV cache bytes.
+
+        For DeepSeek V4: three pools (SWA/C4/C128), each with its own
+        block_size and compress_ratio.  584 bytes/token (fp8_ds_mla).
+        """
         arch = self._backend_config.model_arch
+
         if arch.is_mla:
-            per_token = 584  # fp8_ds_mla
+            per_token = 584
         else:
-            dtype_size = 2  # bf16
+            dtype_size = 2
             per_token = 2 * arch.num_kv_heads * arch.head_size * dtype_size
-        return self._total_tokens * per_token * arch.num_layers
+
+        # tokens in the mock pool already account for per-group storage sizes
+        return self._mock_allocator._total * per_token
 
     @property
     def name(self) -> str:
