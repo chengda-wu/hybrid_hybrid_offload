@@ -36,7 +36,7 @@ class SimulationEngine:
         # and hash_block_size as GCD (required by vLLM assertion).
         import math
 
-        group_block_sizes = [g[1] for g in self._model_arch.layer_groups]
+        group_block_sizes = [g[1] for g in self._model_arch.layer_groups]  # (name, bs, cr, n_layers)
         scheduler_block_size = group_block_sizes[0]
         hash_block_size_val = group_block_sizes[0]
         for bs in group_block_sizes[1:]:
