@@ -28,7 +28,7 @@ python -m simulator.run [OPTIONS]
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--backend` | `vllm` | KV cache 后端，`vllm` 或 `sglang` |
-| `--model-config` | — | HuggingFace `config.json` 路径。省略则使用 **DeepSeek V4 Flash** 硬编码默认值（43 层 MLA，512 维 head，compress_ratio=8） |
+| `--model-config` | — | HuggingFace `config.json` 路径。省略则使用 **DeepSeek V4 Flash** 硬编码默认值（43 层 MLA，512 维 head，SWA=2/C4=21/C128=20） |
 | `--max-model-len` | `8192` | 模型最大上下文长度（token 数） |
 | `--kv-block-size` | `16` | KV cache 块大小（每个 block 包含的 token 数）。vLLM 按此粒度分配/匹配 |
 | `--num-kv-blocks` | `4096` | KV cache 块池总数。决定总可用缓存空间：`blocks × block_size × per_token_bytes` |

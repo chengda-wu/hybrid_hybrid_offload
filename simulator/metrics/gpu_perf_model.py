@@ -54,7 +54,10 @@ class GPUPerfModel:
         self._fit()
 
     def _fit(self) -> None:
-        """Fit coefficients via least squares from data points."""
+        """Fit coefficients for latency = a*m + b*n + c*m*n + d.
+
+        Uses Gaussian elimination on the 4×4 normal equations (XᵀX)β = Xᵀy.
+        """
         # Check for explicit coefficient overrides
         if (
             self._config.loaded_coeff is not None
@@ -77,95 +80,72 @@ class GPUPerfModel:
 
         n = len(points)
         if n == 0:
-            self._d = 1.0  # fallback constant latency
+            self._d = 1.0
             self._fitted = True
             return
 
-        # Solve normal equations for the linear model:
-        #   y = a*x1 + b*x2 + c*x1*x2 + d
-        # Design matrix X: [loaded, computed, loaded*computed, 1]
-        sum_x1 = sum(p.loaded_tokens for p in points)
-        sum_x2 = sum(p.computed_tokens for p in points)
-        sum_x12 = sum(p.loaded_tokens * p.computed_tokens for p in points)
-        sum_x1sq = sum(p.loaded_tokens * p.loaded_tokens for p in points)
-        sum_x2sq = sum(p.computed_tokens * p.computed_tokens for p in points)
-        sum_x12sq = sum(
-            p.loaded_tokens * p.computed_tokens * p.loaded_tokens * p.computed_tokens
-            for p in points
-        )
-        sum_y = sum(p.latency_ms for p in points)
-        sum_x1y = sum(p.loaded_tokens * p.latency_ms for p in points)
-        sum_x2y = sum(p.computed_tokens * p.latency_ms for p in points)
-        sum_x12y = sum(
-            p.loaded_tokens * p.computed_tokens * p.latency_ms for p in points
-        )
+        # Build XᵀX (4×4) and Xᵀy (4×1) for:
+        #   y = a·m + b·n + c·m·n + d
+        # columns: [m, n, m·n, 1]
+        m = [p.loaded_tokens for p in points]
+        n_ = [p.computed_tokens for p in points]
+        mn = [p.loaded_tokens * p.computed_tokens for p in points]
+        y = [p.latency_ms for p in points]
 
-        # Direct solve of the 4x4 normal equations
-        # (X^T X) * coeffs = X^T y
-        import math
+        # XᵀX
+        s00 = sum(v * v for v in m)
+        s01 = sum(m[i] * n_[i] for i in range(len(points)))
+        s02 = sum(m[i] * mn[i] for i in range(len(points)))
+        s03 = sum(m)
+        s11 = sum(v * v for v in n_)
+        s12 = sum(n_[i] * mn[i] for i in range(len(points)))
+        s13 = sum(n_)
+        s22 = sum(v * v for v in mn)
+        s23 = sum(mn)
+        s33 = float(len(points))
 
+        # Xᵀy
+        r0 = sum(m[i] * y[i] for i in range(len(points)))
+        r1 = sum(n_[i] * y[i] for i in range(len(points)))
+        r2 = sum(mn[i] * y[i] for i in range(len(points)))
+        r3 = sum(y)
+
+        # Gaussian elimination on augmented matrix [XᵀX | Xᵀy]
         A = [
-            [sum_x1sq, sum_x12, sum_x1 * sum_x2 if False else 0, sum_x1],  # will recompute below
+            [s00, s01, s02, s03, r0],
+            [s01, s11, s12, s13, r1],
+            [s02, s12, s22, s23, r2],
+            [s03, s13, s23, s33, r3],
         ]
-        # Actually, a pure-Python least squares is error-prone. Use a very simple
-        # approach: solve just for a, b, d (no interaction term) if data is sparse,
-        # then refine.
 
-        # Simplified: use the analytical solution for the 3×3 case first
-        # to avoid heavy dependencies.
-        # We'll fit: latency = a*m + b*n + d  (no interaction)
-        # Then add interaction term by fitting residual.
+        # Forward elimination
+        for col in range(4):
+            # Pivot
+            pivot_row = max(range(col, 4), key=lambda r: abs(A[r][col]))
+            if abs(A[pivot_row][col]) < 1e-12:
+                continue  # singular column, leave as 0
+            A[col], A[pivot_row] = A[pivot_row], A[col]
+            pivot = A[col][col]
+            for j in range(col, 5):
+                A[col][j] /= pivot
+            for row in range(4):
+                if row != col and abs(A[row][col]) > 1e-15:
+                    factor = A[row][col]
+                    for j in range(col, 5):
+                        A[row][j] -= factor * A[col][j]
 
-        # Fit linear: y = a*m + b*n + d
-        # Solve via ordinary least squares for 3 params
-        det = n * (sum_x1sq * sum_x2sq - sum_x12 * sum_x12) - (
-            sum_x1 * (sum_x1 * sum_x2sq - sum_x2 * sum_x12)
-            - sum_x2 * (sum_x1 * sum_x12 - sum_x2 * sum_x1sq)
-        )
-        if abs(det) < 1e-9:
-            # Fallback: just use mean latency as constant
-            self._d = sum_y / n
-        else:
-            # Compute via Cramer's rule for the 3×3 system
-            # [ sum_x1sq  sum_x12   sum_x1 ] [a]   [sum_x1y]
-            # [ sum_x12   sum_x2sq  sum_x2 ] [b] = [sum_x2y]
-            # [ sum_x1    sum_x2    n      ] [d]   [sum_y  ]
-            det_a = (
-                sum_x1y * (sum_x2sq * n - sum_x2 * sum_x2)
-                - sum_x12 * (sum_x2y * n - sum_y * sum_x2)
-                + sum_x1 * (sum_x2y * sum_x2 - sum_y * sum_x2sq)
-            )
-            det_b = (
-                sum_x1sq * (sum_x2y * n - sum_y * sum_x2)
-                - sum_x1y * (sum_x12 * n - sum_x1 * sum_x2)
-                + sum_x1 * (sum_x12 * sum_y - sum_x1 * sum_x2y)
-            )
-            det_d = (
-                sum_x1sq * (sum_x2sq * sum_y - sum_x2 * sum_x2y)
-                - sum_x12 * (sum_x12 * sum_y - sum_x1 * sum_x2y)
-                + sum_x1 * (sum_x12 * sum_x2y - sum_x1 * sum_x2sq)
-            )
-            self._a = max(0.0, det_a / det)
-            self._b = max(0.0, det_b / det)
-            self._d = max(0.0, det_d / det)
+        # Extract solution
+        self._a = A[0][4]
+        self._b = A[1][4]
+        self._c = A[2][4]
+        self._d = A[3][4]
 
-        # Fit interaction term from residuals
-        residuals = []
-        interactions = []
-        for p in points:
-            pred = self._a * p.loaded_tokens + self._b * p.computed_tokens + self._d
-            resid = p.latency_ms - pred
-            inter = p.loaded_tokens * p.computed_tokens
-            if inter > 0:
-                residuals.append(resid)
-                interactions.append(inter)
-        if interactions:
-            sum_inter_sq = sum(v * v for v in interactions)
-            if sum_inter_sq > 0:
-                sum_inter_resid = sum(
-                    i * r for i, r in zip(interactions, residuals)
-                )
-                self._c = max(0.0, sum_inter_resid / sum_inter_sq)
+        # Clamp negative coefficients to 0 (latency should not decrease
+        # with more tokens)
+        self._a = max(0.0, self._a)
+        self._b = max(0.0, self._b)
+        self._c = max(0.0, self._c)
+        self._d = max(0.0, self._d)
 
         self._fitted = True
 

@@ -90,19 +90,20 @@ class SimulatorScheduler:
             step_latency = self._gpu_perf.predict(total_loaded, total_computed)
         self._sim_time += step_latency
 
-        # 4. Record per-step metrics
-        active_count = sum(1 for r in self._running.values() if not r.is_finished)
-        self._recorder.record_step(
-            step=self._step,
-            sim_time=self._sim_time,
-            step_latency=step_latency,
-            num_running=active_count,
-            num_waiting=len(self._waiting),
-            cache_usage=self._backend.usage,
-            loaded_tokens=total_loaded,
-            computed_tokens=total_computed,
-            accepted_tokens=total_accepted,
-        )
+        # 4. Record per-step metrics (skip warmup)
+        if self._step > self._warmup:
+            active_count = sum(1 for r in self._running.values() if not r.is_finished)
+            self._recorder.record_step(
+                step=self._step,
+                sim_time=self._sim_time,
+                step_latency=step_latency,
+                num_running=active_count,
+                num_waiting=len(self._waiting),
+                cache_usage=self._backend.usage,
+                loaded_tokens=total_loaded,
+                computed_tokens=total_computed,
+                accepted_tokens=total_accepted,
+            )
 
         # 5. Free finished
         self._cleanup()
@@ -121,8 +122,10 @@ class SimulatorScheduler:
         """
         backend = self._backend
 
-        # Register with backend (builds real vllm Request, etc.)
-        backend.add_request(req.backend_req)
+        # Register with backend once (avoid re-creating Request on retry)
+        if not getattr(req, "_registered", False):
+            backend.add_request(req.backend_req)
+            req._registered = True
 
         # Find prefix cache hits
         blocks, num_computed = backend.get_computed_blocks(req.backend_req)
@@ -217,6 +220,11 @@ class SimulatorScheduler:
         accepted_tokens.extend(spec_tokens[:num_accepted])
 
         req.append_output_tokens(accepted_tokens)
+
+        # Clear spec tokens BEFORE syncing to backend (sync should reflect
+        # only accepted tokens, not pending draft tokens)
+        req.clear_spec_tokens()
+
         if req.backend_req is not None and hasattr(req.backend_req, "output_token_ids"):
             req.backend_req.output_token_ids = req.output_token_ids
             sync_fn = getattr(req.backend_req, "sync_to_vllm", None)
@@ -235,9 +243,6 @@ class SimulatorScheduler:
         if req.output_length >= req.max_output_tokens:
             req.status = RequestStatus.FINISHED
             req.finish_time = self._sim_time
-
-        # 11. Clear spec tokens for next step
-        req.clear_spec_tokens()
 
         if self._verbose:
             print(

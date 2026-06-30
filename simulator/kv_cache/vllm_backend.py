@@ -104,9 +104,9 @@ class vLLMBackend(KVBackend):
 
     @property
     def usage(self) -> float:
-        num_used = self.num_free_blocks
+        num_free = self.num_free_blocks
         total = self.total_blocks
-        return 1.0 - (num_used / total) if total > 0 else 0.0
+        return 1.0 - (num_free / total) if total > 0 else 0.0
 
     @property
     def num_free_blocks(self) -> int:
@@ -165,9 +165,11 @@ class vLLMSimRequest:
     def sync_to_vllm(self) -> None:
         """Push simulator token state into the vllm Request.
 
-        Called after acceptance to align the vllm Request's computed_tokens
-        and output token ids with simulator state.
+        Only sync prompt + accepted output tokens; spec tokens are excluded
+        since they may be rejected.
         """
         if self._vllm_request is None:
             return
-        self._vllm_request.num_computed_tokens = self.num_tokens
+        self._vllm_request.num_computed_tokens = (
+            len(self.prompt_token_ids) + len(self.output_token_ids)
+        )

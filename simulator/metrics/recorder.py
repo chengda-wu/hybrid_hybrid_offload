@@ -47,8 +47,6 @@ class MetricsRecorder:
     def __init__(self):
         self.steps: list[StepRecord] = []
         self.requests: list[RequestRecord] = []
-        self._step_accepted: int = 0
-
     def record_step(
         self,
         step: int,

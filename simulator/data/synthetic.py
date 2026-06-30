@@ -18,7 +18,7 @@ class RequestData:
     request_id: str
     prompt_token_ids: list[int]
     ground_truth_output: list[int]  # full output for acceptance verification
-    arrival_time: float = 0.0  # simulation seconds
+    arrival_time: float = 0.0  # simulation time in ms
 
 
 class SyntheticDataGenerator:
@@ -122,8 +122,8 @@ class SyntheticDataGenerator:
 
     @staticmethod
     def _compute_arrival_time(index: int) -> float:
-        """Simple staggered arrival times."""
+        """Staggered arrival times in *milliseconds* (matching _sim_time unit)."""
         if index == 0:
             return 0.0
-        # 0.1 second gaps between arrivals by default
-        return index * 0.1
+        # 100 ms gaps between arrivals
+        return index * 100.0

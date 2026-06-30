@@ -76,13 +76,13 @@ class StatisticsComputer:
         ttft_p50 = _percentile(ttfts, 50)
         ttft_p99 = _percentile(ttfts, 99)
 
-        # TPOT: time per output token = total_latency / output_length
-        # (simplified — not per-token-interval, but avg over request lifetime)
-        tpots = [
-            r.total_latency_ms / r.output_length
-            for r in reqs
-            if r.output_length > 0
-        ]
+        # TPOT: time per output token (excludes first token / TTFT).
+        # For requests with >1 output token: (total - ttft) / (output - 1)
+        tpots = []
+        for r in reqs:
+            if r.output_length > 1 and r.ttft_ms is not None:
+                tpot = (r.total_latency_ms - r.ttft_ms) / (r.output_length - 1)
+                tpots.append(tpot)
         tpot_p50 = _percentile(tpots, 50)
         tpot_p99 = _percentile(tpots, 99)
 
