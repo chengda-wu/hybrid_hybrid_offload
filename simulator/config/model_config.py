@@ -428,13 +428,18 @@ class VLLMConfig:
         # 5. C4 Indexer — DeepseekV4IndexerCache (attention.py:643-655)
         #    MLAAttentionSpec(alignment=576), only for cr=4
         if c4_layers:
-            # indexer_head_dim = 128; k_cache_head_dim = 128 + 4 = 132 bytes/token
-            indexer_head_dim = 128 + 128 // 128 * 4  # ≈ 132
+            # attention.py:729: k_cache_head_dim = head_dim + head_dim // quant_block_size * 4
+            # SparseMLA's head_dim = index_head_dim = 128; quant_block_size = 128 (attention.py:712)
+            # 128 + 128//128*4 = 132 bytes/token.  This value is passed as head_dim
+            # to DeepseekV4IndexerCache.__init__ (attention.py:730-732).
+            index_head_dim = 128
+            quant_block_size = 128  # hardcoded TODO in vLLM source
+            k_cache_head_dim = index_head_dim + index_head_dim // quant_block_size * 4  # = 132
             # DeepseekV4IndexerCache.get_kv_cache_spec (attention.py:643-655)
             # does NOT set model_version or cache_dtype_str
             c4_idx_spec = MLAAttentionSpec(
                 block_size=256, num_kv_heads=1,
-                head_size=indexer_head_dim, dtype=_torch.uint8,
+                head_size=k_cache_head_dim, dtype=_torch.uint8,
                 compress_ratio=4, cache_dtype_str=None,
                 alignment=576,
             )
