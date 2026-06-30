@@ -108,6 +108,13 @@ class SimulatorScheduler:
         # 5. Free finished
         self._cleanup()
 
+        # 6. If no running requests but waiting queue has arrivals in the
+        #    future, fast-forward sim_time to the next arrival.
+        if not self._running and self._waiting:
+            next_arrival = self._waiting[0].arrival_time
+            if next_arrival > self._sim_time:
+                self._sim_time = next_arrival
+
         remaining = sum(1 for r in self._running.values() if not r.is_finished)
         return remaining > 0 or len(self._waiting) > 0
 

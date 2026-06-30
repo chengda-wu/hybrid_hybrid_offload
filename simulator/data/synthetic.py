@@ -125,5 +125,5 @@ class SyntheticDataGenerator:
         """Staggered arrival times in *milliseconds* (matching _sim_time unit)."""
         if index == 0:
             return 0.0
-        # 100 ms gaps between arrivals
-        return index * 100.0
+        # 10 ms gaps between arrivals (in ms, matching _sim_time unit)
+        return index * 10.0
