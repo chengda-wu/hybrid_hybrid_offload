@@ -58,6 +58,20 @@ class SimulationEngine:
 
     def run(self) -> SimulationReport:
         """Run the full simulation and return the report."""
+        # Print config summary
+        kv_size_gb = self._compute_kv_cache_size_gb()
+        print(
+            f"Backend: {self._backend.name} | "
+            f"Model: {self._model_arch.model_type} ({self._model_arch.num_layers} layers) | "
+            f"KV Cache: {kv_size_gb:.2f} GB ({self._config.num_kv_cache_blocks} blocks × "
+            f"{self._config.kv_cache_block_size} tokens)"
+        )
+        print(
+            f"Requests: {self._config.dataset.synthetic.num_requests} | "
+            f"Spec tokens: K={self._config.speculative.num_spec_tokens} | "
+            f"Seed: {self._config.random_seed}"
+        )
+
         # Load data
         loader = DatasetLoader(self._config.dataset, seed=self._config.random_seed)
         request_datas = loader.load()
@@ -89,7 +103,28 @@ class SimulationEngine:
         return stats.compute(
             recorder=self._recorder,
             backend=self._backend.name,
+            kv_cache_size_gb=kv_size_gb,
         )
+
+    def _compute_kv_cache_size_gb(self) -> float:
+        """Compute total KV cache size in GB."""
+        arch = self._model_arch
+        cfg = self._config
+        num_layers = arch.num_layers
+        num_blocks = cfg.num_kv_cache_blocks
+
+        if arch.is_mla:
+            # DeepSeek V4 MLA fp8: 584 bytes per token
+            # storage_block_size = block_size // compress_ratio
+            storage_tokens_per_block = cfg.kv_cache_block_size // max(arch.compress_ratio, 1)
+            per_token_bytes = 584
+        else:
+            storage_tokens_per_block = cfg.kv_cache_block_size
+            dtype_bytes = 2  # bf16 default
+            per_token_bytes = 2 * arch.num_kv_heads * arch.head_size * dtype_bytes
+
+        total_bytes = num_blocks * storage_tokens_per_block * per_token_bytes * num_layers
+        return total_bytes / (1024**3)
 
     def _build_backend(self) -> KVBackend:
         if self._config.backend == "vllm":

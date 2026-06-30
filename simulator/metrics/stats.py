@@ -44,6 +44,7 @@ class SimulationReport:
 
     # ---- Config ----
     backend: str = ""
+    kv_cache_size_gb: float = 0.0
 
     def to_json(self, path: str | Path | None = None) -> str:
         data = asdict(self)
@@ -60,6 +61,7 @@ class StatisticsComputer:
         self,
         recorder: MetricsRecorder,
         backend: str = "",
+        kv_cache_size_gb: float = 0.0,
     ) -> SimulationReport:
         steps = recorder.steps
         reqs = recorder.requests
@@ -131,6 +133,7 @@ class StatisticsComputer:
             total_sim_time_ms=round(total_time, 2),
             tokens_per_second=round(tokens_per_sec, 1),
             backend=backend,
+            kv_cache_size_gb=round(kv_cache_size_gb, 2),
         )
 
 
