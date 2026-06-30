@@ -146,17 +146,23 @@ class ModelArchitecture:
     def deepseek_v4_flash(cls) -> "ModelArchitecture":
         """Hardcoded defaults for DeepSeek V4 Flash (FP8).
 
-        KV cache layout (three groups from vLLM):
-          - SWA (compress_ratio=0):  SlidingWindowMLASpec, block_size=64, page=37376 B
-          - C4  (compress_ratio=4):  MLAAttentionSpec,    block_size=256, page=37376 B (256/4*584)
-          - C128 (compress_ratio=128): MLAAttentionSpec,   block_size=256, page=1168 B  (256/128*584)
+        Real compress_ratios from HuggingFace config.json
+        (deepseek-ai/DeepSeek-V4-Flash):
+          layers 0-1:  SWA-only (compress_ratio=0)
+          layers 2-42: alternating C4 (ratio=4) and C128 (ratio=128)
+          → SWA=2, C4=21, C128=20
+        Plus 1 MTP layer at index 43 (compress_ratio=0, not counted).
 
-        Typical 43-layer distribution: 5 SWA + 19 C4 + 19 C128.
+        KV cache groups:
+          - SWA:  SlidingWindowMLASpec, block_size=64, all 43 layers
+          - C4:   MLAAttentionSpec,  block_size=256, cr=4,  21 layers
+          - C128: MLAAttentionSpec,  block_size=256, cr=128, 20 layers
         """
-        # Build representative per-layer pattern
-        compress_ratios = (
-            [0] * 5 + [4] * 19 + [128] * 19
-        )[:43]  # ensure exactly 43
+        # Real per-layer pattern from HuggingFace config.json
+        compress_ratios = [0, 0]
+        for i in range(41):
+            compress_ratios.append(4 if i % 2 == 0 else 128)
+        # → 43 layers: [0, 0, 4, 128, 4, 128, ..., 4]
         return cls(
             model_type="deepseek_v4",
             num_layers=43,
@@ -168,7 +174,7 @@ class ModelArchitecture:
             dtype="bfloat16",
             kv_lora_rank=512,
             qk_rope_head_dim=64,
-            compress_ratio=4,  # representative (19 C4 layers)
+            compress_ratio=4,  # representative (21 C4 layers vs 20 C128)
             compress_ratios=compress_ratios,
             sliding_window=128,
             vocab_size=129280,
