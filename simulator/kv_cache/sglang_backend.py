@@ -160,6 +160,9 @@ class SGLangBackend(KVBackend):
 
         new_indices = self._mock_allocator.allocate(to_alloc)
 
+        # Track all allocated indices for this request (fix leak in free())
+        sim_req._allocated_indices.append(new_indices)
+
         # Insert the full token sequence into the radix tree
         all_tokens = array(
             "q",
@@ -173,16 +176,11 @@ class SGLangBackend(KVBackend):
         return new_indices
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
-        """Free all token slots for this request."""
-        all_tokens = array("q", sim_req.prompt_token_ids + sim_req.output_token_ids)
-        from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
-        from sglang.srt.mem_cache.radix_cache import RadixKey
-
-        result = self._cache.match_prefix(
-            MatchPrefixParams(key=RadixKey(token_ids=all_tokens))
-        )
-        if len(result.device_indices) > 0:
-            self._mock_allocator.free(result.device_indices)
+        """Free all token slots ever allocated for this request."""
+        for indices in sim_req._allocated_indices:
+            if len(indices) > 0:
+                self._mock_allocator.free(indices)
+        sim_req._allocated_indices.clear()
 
     def reset(self) -> None:
         self._cache.reset()
@@ -203,21 +201,44 @@ class SGLangBackend(KVBackend):
 
     @property
     def total_bytes(self) -> int:
-        """Total KV cache bytes.
+        """Total KV cache bytes, computed per-group with correct per-token cost.
 
-        For DeepSeek V4: three pools (SWA/C4/C128), each with its own
-        block_size and compress_ratio.  584 bytes/token (fp8_ds_mla).
+        DeepSeek V4 groups have different per-token byte costs:
+          - SWA / C4 MLA / C128 MLA: 584 bytes/token (fp8_ds_mla KV)
+          - C4/C128 Compressor: float32 state (different dims per type)
+          - C4 Indexer: 132 bytes/token (fp8 + fp32 scales)
         """
         arch = self._backend_config.model_arch
+        total = 0
 
-        if arch.is_mla:
-            per_token = 584
+        if arch.is_mla and arch.compress_ratios is not None:
+            c4_layers = sum(1 for cr in arch.compress_ratios if cr == 4)
+            c128_layers = sum(1 for cr in arch.compress_ratios if cr == 128)
+            blocks = self._backend_config.num_kv_cache_blocks
+
+            # SWA: 64 tokens/block, 584 B/token, all 43 layers
+            total += arch.num_layers * blocks * 64 * 584
+            # C4 MLA: 64 effective tokens/block, 584 B/token
+            total += c4_layers * blocks * 64 * 584
+            # C128 MLA: 2 effective tokens/block, 584 B/token
+            total += c128_layers * blocks * 2 * 584
+            # C4 Compressor: 4 tokens/block, float32, state_dim=2048
+            total += c4_layers * blocks * 4 * 2048 * 4
+            # C128 Compressor: 8 tokens/block, float32, state_dim=1024
+            total += c128_layers * blocks * 8 * 1024 * 4
+            # C4 Indexer: 64 effective tokens/block, 132 B/token
+            total += c4_layers * blocks * 64 * 132
         else:
             dtype_size = 2
             per_token = 2 * arch.num_kv_heads * arch.head_size * dtype_size
+            total = (
+                self._backend_config.num_kv_cache_blocks
+                * self._backend_config.block_size
+                * per_token
+                * arch.num_layers
+            )
 
-        # tokens in the mock pool already account for per-group storage sizes
-        return self._mock_allocator._total * per_token
+        return total
 
     @property
     def name(self) -> str:
@@ -238,6 +259,7 @@ class SGLangSimRequest:
         "max_tokens",
         "output_token_ids",
         "spec_token_ids",
+        "_allocated_indices",
     )
 
     def __init__(
@@ -248,6 +270,7 @@ class SGLangSimRequest:
         self.max_tokens = max_tokens
         self.output_token_ids: list[int] = []
         self.spec_token_ids: list[int] = []
+        self._allocated_indices: list[Any] = []  # track all allocs for free()
 
     @property
     def num_tokens(self) -> int:
