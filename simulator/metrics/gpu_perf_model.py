@@ -140,12 +140,15 @@ class GPUPerfModel:
         self._c = A[2][4]
         self._d = A[3][4]
 
-        # Clamp negative coefficients to 0 (latency should not decrease
-        # with more tokens)
+        # Per-token costs should not be negative
         self._a = max(0.0, self._a)
         self._b = max(0.0, self._b)
-        self._c = max(0.0, self._c)
-        self._d = max(0.0, self._d)
+        # c (interaction) and d (base) can legitimately be negative:
+        # c < 0 when large batches amortize overhead; d < 0 when
+        # data trends below the origin.  Clamping would distort
+        # predictions.
+        self._c = self._c
+        self._d = self._d
 
         self._fitted = True
 
@@ -157,12 +160,15 @@ class GPUPerfModel:
             computed_tokens: New tokens to compute in this forward.
         """
         assert self._fitted, "Model not fitted"
-        return (
+        latency = (
             self._a * loaded_tokens
             + self._b * computed_tokens
             + self._c * loaded_tokens * computed_tokens
             + self._d
         )
+        # Floor at 0 — latency cannot be negative even if fitted
+        # coefficients produce a small negative value for tiny loads.
+        return max(0.0, latency)
 
     @property
     def coefficients(self) -> tuple[float, float, float, float]:

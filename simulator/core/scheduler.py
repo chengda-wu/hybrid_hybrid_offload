@@ -281,7 +281,8 @@ class SimulatorScheduler:
         for req_id, req in list(self._running.items()):
             if req.is_finished:
                 self._backend.free(req.backend_req)
-                self._recorder.record_request_done(req, self._sim_time)
+                if self._step > self._warmup:
+                    self._recorder.record_request_done(req, self._sim_time)
                 del self._running[req_id]
                 if self._verbose:
                     print(f"  [{req_id}] finished, freed")

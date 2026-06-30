@@ -55,7 +55,7 @@ class ModelArchitecture:
         """Return KV cache layer groups for hybrid MLA models.
 
         Each element is (group_name, block_size, compress_ratio, num_layers).
-        Real vLLM DeepSeek V4 has 5 groups (not 3):
+        Real vLLM DeepSeek V4 has 6 groups (5 types, C4/C128 MLA split):
           - SWA:  DeepseekV4SWACache → SlidingWindowMLASpec(bs=64),
                   ALL 43 layers (attention.py:290)
           - C4 Compressor:  CompressorStateCache → SlidingWindowMLASpec(bs=4,
@@ -80,7 +80,8 @@ class ModelArchitecture:
         # 1. SWA main KV: DeepseekV4SWACache (bs=64), ALL 43 layers
         groups.append(("swa", 64, 1, self.num_layers))
 
-        # 2. C4 Compressor: CompressorStateCache (bs=4, dtype=float32)
+        # 2. C4 Compressor: CompressorStateCache (bs=4, dtype=float32).
+        # cr=0 is a sentinel — callers use max(cr,1) so storage = bs//1 = bs.
         c4_count = sum(1 for cr in ratios if cr == 4)
         if c4_count:
             groups.append(("c4_compressor", 4, 0, c4_count))
@@ -310,10 +311,11 @@ class VLLMConfig:
     ) -> tuple[list["KVCacheGroupSpec"], list["KVCacheTensor"]]:
         """Build per-type KV cache groups for hybrid MLA models.
 
-        DeepSeek V4 has three types:
-          - SWA  (compress_ratio <= 1): SlidingWindowMLASpec, block_size=64
-          - C4   (compress_ratio == 4): MLAAttentionSpec,    block_size=256, cr=4
-          - C128 (compress_ratio == 128): MLAAttentionSpec,  block_size=256, cr=128
+        DeepSeek V4 has 6 groups (5 attention types):
+          - SWA (bs=64, all layers)
+          - C4/C128 Compressor (bs=4/8, float32 state)
+          - C4/C128 Main MLA (bs=256, cr=4/128)
+          - C4 Indexer (alignment=576)
         """
         import torch as _torch
 
@@ -360,7 +362,7 @@ class VLLMConfig:
         # 2. C4 Compressor — CompressorStateCache (compressor.py:150,157-169)
         #    SlidingWindowMLASpec(bs=4, sw=8, head_size=state_dim, dtype=float32)
         if c4_layers:
-            coff = 1 + (4 == 4)  # = 2 for cr=4
+            coff = 2  # compressor.py:141  coff = 1 + (compress_ratio == 4)
             c4_cmpr_state_dim = 2 * coff * arch.head_size  # 2*2*512 = 2048
             c4_cmpr_spec = SlidingWindowMLASpec(
                 block_size=4,
@@ -378,7 +380,7 @@ class VLLMConfig:
         # 3. C128 Compressor — CompressorStateCache (compressor.py:152,157-169)
         #    SlidingWindowMLASpec(bs=8, sw=128, head_size=state_dim, dtype=float32)
         if c128_layers:
-            coff = 1 + (128 == 4)  # = 1 for cr=128
+            coff = 1  # compressor.py:141  coff = 1 + (compress_ratio == 4)
             c128_cmpr_state_dim = 2 * coff * arch.head_size  # 2*1*512 = 1024
             c128_cmpr_spec = SlidingWindowMLASpec(
                 block_size=8,
@@ -428,12 +430,13 @@ class VLLMConfig:
         if c4_layers:
             # indexer_head_dim = 128; k_cache_head_dim = 128 + 4 = 132 bytes/token
             indexer_head_dim = 128 + 128 // 128 * 4  # ≈ 132
+            # DeepseekV4IndexerCache.get_kv_cache_spec (attention.py:643-655)
+            # does NOT set model_version or cache_dtype_str
             c4_idx_spec = MLAAttentionSpec(
                 block_size=256, num_kv_heads=1,
                 head_size=indexer_head_dim, dtype=_torch.uint8,
                 compress_ratio=4, cache_dtype_str=None,
                 alignment=576,
-                model_version=bc.model_version,
             )
             c4_idx_names = [f"model.layers.{i}.self_attn.k_cache" for i in c4_layers]
             groups.append(KVCacheGroupSpec(c4_idx_names, c4_idx_spec))
