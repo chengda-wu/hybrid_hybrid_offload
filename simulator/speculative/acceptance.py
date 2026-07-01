@@ -28,17 +28,13 @@ class AcceptanceModel:
     def __init__(self, config: SpeculativeDecodeConfig, seed: int = 42):
         self._config = config
         self._rng = random.Random(seed)
-        # Validate acceptance_rates length
         if config.accept_mode == "per_position" and config.acceptance_rates:
             if len(config.acceptance_rates) < config.num_spec_tokens:
-                import logging
-                _log = logging.getLogger(__name__)
-                _log.warning(
-                    "acceptance_rates has %d entries but num_spec_tokens=%d; "
-                    "positions beyond %d will use the last rate (%.2f)",
-                    len(config.acceptance_rates), config.num_spec_tokens,
-                    len(config.acceptance_rates) - 1,
-                    config.acceptance_rates[-1],
+                raise ValueError(
+                    f"acceptance_rates has {len(config.acceptance_rates)} entries "
+                    f"but num_spec_tokens={config.num_spec_tokens}. "
+                    f"Provide at least {config.num_spec_tokens} rates "
+                    f"(one per draft position)."
                 )
 
     def evaluate(
