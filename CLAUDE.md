@@ -80,11 +80,20 @@ Examples of what we should **never** do:
 
 ```
 SimulatorScheduler ── KVBackend (ABC)
-                        ├── vLLMBackend  ── vllm KVCacheManager
-                        └── SGLangBackend ── sglang RadixCache
+                        ├── vLLMBackend  ── vllm KVCacheManager  ── 0 sglang imports
+                        └── SGLangBackend ── sglang RadixCache   ── 0 vllm imports
+                             │                    │
+                             └──── KVGroupInfo ───┘  (framework-agnostic, in model_config.py)
 ```
 
 The scheduler only speaks `KVBackend`. It never imports vllm or sglang directly. All framework differences (block-level vs token-level, packed vs flat layout, lock_ref semantics) are hidden behind the backend interface. When adding a feature that differs between vllm and sglang, push the difference DOWN into the backend implementations, not UP into the scheduler.
+
+### vLLM and SGLang must be mutually independent
+
+- **vLLM backend** imports only from `vllm.*` — never from `sglang.*` or `SGLangConfig`
+- **SGLang backend** imports only from `sglang.*` — never from `vllm.*` or `VLLMConfig`
+- **Shared model description** lives in `KVGroupInfo` (framework-agnostic dataclass in `model_config.py`): name, block_size, page_bytes (unpadded), layer_count.  Both backends consume this; neither backend's types leak into it.
+- If a conversion is needed (e.g. KVGroupInfo → KVCacheGroupSpec), it lives in the backend that needs it (`VLLMConfig._build_vllm_specs`).
 - **Don't hardcode model parameters.** DeepSeek V4 defaults come from the actual HF `config.json` (verified against `deepseek-ai/DeepSeek-V4-Flash`). Any new model should be configurable via `--model-config`.
 - **Spec token lifecycle mirrors vLLM scheduler.** `_update_after_schedule` adds all (1+K), `update_from_output` subtracts rejected. Bonus token is always from ground truth, never counted in acceptance.
 - **No chunked prefill.** By design — documented limitation.
