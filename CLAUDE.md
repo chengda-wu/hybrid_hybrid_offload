@@ -62,7 +62,29 @@ SGLang SWA ring uses `swa_full_tokens_ratio=0.1` (deepseek_v4_hook.py:57) — on
 
 ## Critical rules
 
-- **Import real vllm/sglang functions, don't reimplement.** The simulation's KV cache behavior must match real engines. Block splitting, tensor sizing, page alignment — delegate to vllm/sglang internals.
+### Always import from vllm/sglang — never reimplement
+
+The simulation must reflect real engine behavior exactly. Any logic related to KV cache management — block splitting, tensor sizing, page alignment, prefix matching, eviction — must be done by calling the real vllm or sglang function, not by hand-coding our own version.
+
+Examples of what we **correctly** delegate:
+- vLLM block/tensor layout → `_get_kv_cache_config_packed`, `_bucket_layers_by_page_size`
+- SGLang prefix matching → `RadixCache.create_simulated()`, `match_prefix()`, `insert()`, `evict()`
+- vLLM `num_computed_tokens` advancement → mirrors `_update_after_schedule` / `update_from_output` semantics
+
+Examples of what we should **never** do:
+- Hand-code block splitting across groups (use vLLM's `_get_kv_cache_config_packed`)
+- Hand-code page size computation (use vLLM's `page_size_bytes` property on the spec)
+- Hand-code radix tree logic (use SGLang's `RadixCache` directly)
+
+### KVBackend is the abstraction layer
+
+```
+SimulatorScheduler ── KVBackend (ABC)
+                        ├── vLLMBackend  ── vllm KVCacheManager
+                        └── SGLangBackend ── sglang RadixCache
+```
+
+The scheduler only speaks `KVBackend`. It never imports vllm or sglang directly. All framework differences (block-level vs token-level, packed vs flat layout, lock_ref semantics) are hidden behind the backend interface. When adding a feature that differs between vllm and sglang, push the difference DOWN into the backend implementations, not UP into the scheduler.
 - **Don't hardcode model parameters.** DeepSeek V4 defaults come from the actual HF `config.json` (verified against `deepseek-ai/DeepSeek-V4-Flash`). Any new model should be configurable via `--model-config`.
 - **Spec token lifecycle mirrors vLLM scheduler.** `_update_after_schedule` adds all (1+K), `update_from_output` subtracts rejected. Bonus token is always from ground truth, never counted in acceptance.
 - **No chunked prefill.** By design — documented limitation.
