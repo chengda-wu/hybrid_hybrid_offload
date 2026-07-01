@@ -222,22 +222,18 @@ class SGLangBackend(KVBackend):
     def total_bytes(self) -> int:
         """Total KV cache bytes.
 
-        Uses the shared _build_kv_cache_groups() to get KVCacheGroupSpecs,
-        then sums page_size_bytes per group.  SGLang-specific adjustment:
-        deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1, so SWA
-        ring buffer uses 10% of full-density memory.
+        Reads framework-agnostic KVGroupInfo from the shared config.
+        SGLang-specific adjustment: deepseek_v4_hook.py:57 sets
+        swa_full_tokens_ratio=0.1, so SWA ring uses 10% density.
+        No vllm imports or types.
         """
-        groups = self._backend_config.build_kv_cache_groups()
         blocks = self._backend_config.num_kv_cache_blocks
         total = 0
-        for g in groups:
-            layer_count = len(g.layer_names)
-            page_bytes = g.kv_cache_spec.page_size_bytes
-            if g.kv_cache_spec.block_size == 64:
-                # SWA ring: SGLang uses 10% density
-                page_bytes = int(page_bytes * 0.1)
-            total += layer_count * blocks * page_bytes
-
+        for info in self._backend_config.build_kv_cache_groups():
+            page_bytes = info.page_bytes
+            if info.name == "swa":
+                page_bytes = int(page_bytes * 0.1)  # SGLang SWA ring
+            total += info.layer_count * blocks * page_bytes
         return total
 
     @property

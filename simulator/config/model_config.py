@@ -229,13 +229,32 @@ class KVBackendConfig:
         """Number of KV cache groups (derived from layer_groups)."""
         return len(self.model_arch.layer_groups)
 
-    def build_kv_cache_groups(self) -> list["KVCacheGroupSpec"]:
-        """Build KVCacheGroupSpecs from the model architecture.
+    def build_kv_cache_groups(self) -> list["KVGroupInfo"]:
+        """Build framework-agnostic KV group descriptions.
 
-        Shared by both vLLM and SGLang backends — this is a model description,
-        not framework-specific logic.
+        Returns KVGroupInfo with unpadded page_bytes — no vllm or sglang types.
+        vLLM backend converts to KVCacheGroupSpecs; SGLang reads page_bytes directly.
         """
         return _build_kv_cache_groups(self)
+
+
+# ---------------------------------------------------------------------------
+# Framework-agnostic KV group info (shared by vLLM and SGLang)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class KVGroupInfo:
+    """Framework-agnostic description of one KV cache group.
+
+    Contains just the information both backends need — no vllm or sglang types.
+    vLLM converts these to KVCacheGroupSpecs; SGLang reads page_bytes directly.
+    """
+
+    name: str           # "swa", "c4_compressor", etc.
+    block_size: int     # tokens per block
+    page_bytes: int     # unpadded bytes per page (no vLLM alignment)
+    layer_count: int    # number of layers in this group
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +267,86 @@ class VLLMConfig:
     """vLLM-specific config built from KVBackendConfig."""
 
     kv_cache_config: "KVCacheConfig"
+
+    @staticmethod
+    def _build_vllm_specs(bc: KVBackendConfig) -> list["KVCacheGroupSpec"]:
+        """Convert framework-agnostic KVGroupInfo to vLLM KVCacheGroupSpecs."""
+        import torch as _torch
+
+        from vllm.v1.kv_cache_interface import (
+            FullAttentionSpec,
+            KVCacheGroupSpec,
+            MLAAttentionSpec,
+            SlidingWindowMLASpec,
+        )
+
+        arch = bc.model_arch
+        cache_dtype_str = "fp8_ds_mla" if arch.is_mla else None
+        kv_dtype = _torch.uint8 if arch.is_mla else getattr(_torch, arch.dtype)
+
+        groups: list[KVCacheGroupSpec] = []
+
+        for info in bc.build_kv_cache_groups():
+            name, bs, _page, nlayers = info.name, info.block_size, info.page_bytes, info.layer_count
+            layer_names = [f"model.layers.{i}.self_attn" for i in range(nlayers)]
+
+            if name == "swa":
+                groups.append(KVCacheGroupSpec(
+                    [f"model.layers.{i}.self_attn" for i in range(arch.num_layers)],
+                    SlidingWindowMLASpec(
+                        block_size=bs, num_kv_heads=arch.num_kv_heads,
+                        head_size=arch.head_size, dtype=kv_dtype,
+                        sliding_window=arch.sliding_window or 128,
+                        cache_dtype_str=cache_dtype_str, alignment=576,
+                        model_version=bc.model_version,
+                    )))
+            elif name == "c4_compressor":
+                groups.append(KVCacheGroupSpec(
+                    [f"model.layers.{i}.self_attn.compressor" for i in range(nlayers)],
+                    SlidingWindowMLASpec(
+                        block_size=bs, num_kv_heads=1,
+                        head_size=2048, dtype=_torch.float32,
+                        sliding_window=8, alignment=576,
+                    )))
+            elif name == "c128_compressor":
+                groups.append(KVCacheGroupSpec(
+                    [f"model.layers.{i}.self_attn.compressor" for i in range(nlayers)],
+                    SlidingWindowMLASpec(
+                        block_size=bs, num_kv_heads=1,
+                        head_size=1024, dtype=_torch.float32,
+                        sliding_window=128, alignment=576,
+                    )))
+            elif name in ("c4_mla", "c128_mla"):
+                cr = 4 if name == "c4_mla" else 128
+                groups.append(KVCacheGroupSpec(
+                    [f"model.layers.{i}.self_attn" for i in range(nlayers)],
+                    MLAAttentionSpec(
+                        block_size=bs, num_kv_heads=arch.num_kv_heads,
+                        head_size=arch.head_size, dtype=kv_dtype,
+                        compress_ratio=cr, cache_dtype_str=cache_dtype_str,
+                        alignment=576, model_version=bc.model_version,
+                    )))
+            elif name == "c4_indexer":
+                groups.append(KVCacheGroupSpec(
+                    [f"model.layers.{i}.self_attn.k_cache" for i in range(nlayers)],
+                    MLAAttentionSpec(
+                        block_size=bs, num_kv_heads=1,
+                        head_size=132, dtype=_torch.uint8,
+                        compress_ratio=4, cache_dtype_str=None,
+                        alignment=576,
+                    )))
+            elif name == "full":
+                groups.append(KVCacheGroupSpec(
+                    layer_names,
+                    FullAttentionSpec(
+                        block_size=bs,
+                        num_kv_heads=arch.num_kv_heads,
+                        head_size=arch.head_size,
+                        dtype=kv_dtype,
+                        sliding_window=arch.sliding_window,
+                    )))
+
+        return groups
 
     @classmethod
     def from_backend_config(cls, bc: KVBackendConfig) -> "VLLMConfig":
@@ -264,9 +363,9 @@ class VLLMConfig:
         )
         from vllm.v1.kv_cache_interface import KVCacheConfig
 
-        # Build group specs (same as before — spec construction is our
-        # responsibility since we're simulating a model, not loading one).
-        kv_cache_groups = bc.build_kv_cache_groups()
+        # Build KVCacheGroupSpecs from framework-agnostic KVGroupInfo.
+        # vLLM needs full spec objects for _get_kv_cache_config_packed.
+        kv_cache_groups = cls._build_vllm_specs(bc)
 
         # Use vLLM's _bucket_layers_by_page_size + _get_kv_cache_config_packed
         # to compute correct tensor sizes for the shared block pool.
@@ -295,110 +394,49 @@ class VLLMConfig:
             )
         )
 
-def _build_kv_cache_groups(bc: KVBackendConfig) -> list["KVCacheGroupSpec"]:
-    """Build KVCacheGroupSpecs from the model architecture.
+def _build_kv_cache_groups(bc: KVBackendConfig) -> list[KVGroupInfo]:
+    """Build framework-agnostic KV group descriptions.
 
-    Shared by both vLLM and SGLang backends.  Tensor sizing is handled
-    separately by each backend (vLLM delegates to _get_kv_cache_config_packed,
-    SGLang uses page_size_bytes directly).
+    Returns KVGroupInfo with unpadded page_bytes — no vllm or sglang types.
+    Each backend converts these to its own representation.
     """
-    import torch as _torch
-
-    from vllm.v1.kv_cache_interface import (
-        FullAttentionSpec,
-        KVCacheGroupSpec,
-        MLAAttentionSpec,
-        SlidingWindowMLASpec,
-    )
-
     arch = bc.model_arch
 
     if not arch.is_mla or arch.compress_ratios is None:
-        layer_names = [f"model.layers.{i}.self_attn" for i in range(arch.num_layers)]
-        return [KVCacheGroupSpec(layer_names, FullAttentionSpec(
-            block_size=bc.block_size,
-            num_kv_heads=arch.num_kv_heads,
-            head_size=arch.head_size,
-            dtype=getattr(_torch, arch.dtype),
-            sliding_window=arch.sliding_window,
-        ))]
+        # Uniform model: page = 2 * block_size * num_kv_heads * head_size * dtype
+        dtype_size = 2  # bf16
+        page = 2 * bc.block_size * arch.num_kv_heads * arch.head_size * dtype_size
+        return [KVGroupInfo("full", bc.block_size, page, arch.num_layers)]
 
-    kv_dtype = _torch.uint8
-    cache_dtype_str = "fp8_ds_mla"
     ratios = arch.compress_ratios
-    all_layers = list(range(arch.num_layers))
     c4_layers = [i for i, cr in enumerate(ratios) if cr == 4]
     c128_layers = [i for i, cr in enumerate(ratios) if cr == 128]
-    groups: list[KVCacheGroupSpec] = []
+    groups: list[KVGroupInfo] = []
 
-    # 1. SWA (attention.py:290), all 43 layers
-    groups.append(KVCacheGroupSpec(
-        [f"model.layers.{i}.self_attn" for i in all_layers],
-        SlidingWindowMLASpec(
-            block_size=64, num_kv_heads=arch.num_kv_heads,
-            head_size=arch.head_size, dtype=kv_dtype,
-            sliding_window=arch.sliding_window or 128,
-            cache_dtype_str=cache_dtype_str, alignment=576,
-            model_version=bc.model_version,
-        )))
+    # 1. SWA (attention.py:290), all layers
+    groups.append(KVGroupInfo("swa", 64, 64 * 584, arch.num_layers))
 
-    # 2. C4 Compressor (compressor.py:150,157-169)
+    # 2. C4 Compressor (compressor.py:150): bs=4, float32, state_dim=2048
     if c4_layers:
-        coff = 2
-        groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn.compressor" for i in c4_layers],
-            SlidingWindowMLASpec(
-                block_size=4, num_kv_heads=1,
-                head_size=2 * coff * arch.head_size,
-                dtype=_torch.float32,
-                sliding_window=coff * 4, alignment=576,
-            )))
+        groups.append(KVGroupInfo(
+            "c4_compressor", 4, 4 * 2048 * 4, len(c4_layers)))
 
-    # 3. C128 Compressor (compressor.py:152,157-169)
+    # 3. C128 Compressor (compressor.py:152): bs=8, float32, state_dim=1024
     if c128_layers:
-        coff = 1
-        groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn.compressor" for i in c128_layers],
-            SlidingWindowMLASpec(
-                block_size=8, num_kv_heads=1,
-                head_size=2 * coff * arch.head_size,
-                dtype=_torch.float32,
-                sliding_window=coff * 128, alignment=576,
-            )))
+        groups.append(KVGroupInfo(
+            "c128_compressor", 8, 8 * 1024 * 4, len(c128_layers)))
 
-    # 4. Main MLA C4/C128 (attention.py:601-619)
+    # 4. C4 Main MLA (attention.py:601): bs=256, cr=4, 584 B/token
     if c4_layers:
-        groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn" for i in c4_layers],
-            MLAAttentionSpec(
-                block_size=256, num_kv_heads=arch.num_kv_heads,
-                head_size=arch.head_size, dtype=kv_dtype,
-                compress_ratio=4, cache_dtype_str=cache_dtype_str,
-                alignment=576, model_version=bc.model_version,
-            )))
+        groups.append(KVGroupInfo("c4_mla", 256, 64 * 584, len(c4_layers)))
+
+    # 5. C128 Main MLA: bs=256, cr=128, 584 B/token
     if c128_layers:
-        groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn" for i in c128_layers],
-            MLAAttentionSpec(
-                block_size=256, num_kv_heads=arch.num_kv_heads,
-                head_size=arch.head_size, dtype=kv_dtype,
-                compress_ratio=128, cache_dtype_str=cache_dtype_str,
-                alignment=576, model_version=bc.model_version,
-            )))
+        groups.append(KVGroupInfo("c128_mla", 256, 2 * 584, len(c128_layers)))
 
-    # 5. C4 Indexer (attention.py:643-655, 729-732)
+    # 6. C4 Indexer (attention.py:643-655): 132 B/token
     if c4_layers:
-        index_head_dim = 128
-        quant_block_size = 128
-        k_cache_head_dim = index_head_dim + index_head_dim // quant_block_size * 4
-        groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn.k_cache" for i in c4_layers],
-            MLAAttentionSpec(
-                block_size=256, num_kv_heads=1,
-                head_size=k_cache_head_dim, dtype=_torch.uint8,
-                compress_ratio=4, cache_dtype_str=None,
-                alignment=576,
-            )))
+        groups.append(KVGroupInfo("c4_indexer", 256, 64 * 132, len(c4_layers)))
 
     return groups
 
