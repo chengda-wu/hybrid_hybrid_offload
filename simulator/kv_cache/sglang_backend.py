@@ -250,10 +250,12 @@ class SGLangBackend(KVBackend):
         blocks = self._backend_config.num_kv_cache_blocks
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
-            page_bytes = info.page_bytes
+            group_bytes = info.layer_count * blocks * info.page_bytes
             if info.name == "swa":
-                page_bytes = int(page_bytes * 0.1)  # SGLang SWA ring
-            total += info.layer_count * blocks * page_bytes
+                # pool_configurator.py:623: int(full_token * swa_ratio)
+                # Apply 0.1 once per group, not per-page.
+                group_bytes = int(group_bytes * 0.1)
+            total += group_bytes
         return total
 
     @property
