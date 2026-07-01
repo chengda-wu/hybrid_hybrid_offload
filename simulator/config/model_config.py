@@ -43,6 +43,10 @@ class ModelArchitecture:
     # Derived
     vocab_size: int = 129280
     is_mla: bool = False
+    # NOTE: SGLang's model_config.py:783 labels DeepSeek V4 as AttentionArch.MHA,
+    # but the actual memory layout (584 B/token, compress_ratios, FlashMLA backend)
+    # is MLA.  Our simulation uses is_mla=True regardless of backend — the per-token
+    # byte cost and page sizes are the same.
 
     def __post_init__(self) -> None:
         if self.kv_lora_rank is not None and self.qk_rope_head_dim is not None:
