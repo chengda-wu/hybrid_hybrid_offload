@@ -27,7 +27,11 @@ class MockTokenToKVPoolAllocator:
         self._free_list: list[int] = []
 
     def allocate(self, num_tokens: int):
-        """Allocate *num_tokens* token indices, reusing freed ones first."""
+        """Allocate *num_tokens* token indices, reusing freed ones first.
+
+        Returns None on OOM, matching real TokenToKVPoolAllocator.alloc
+        (allocator/token.py:60).  Caller (allocate_slots) handles evict+retry.
+        """
         import torch
 
         if num_tokens <= 0:
@@ -39,10 +43,8 @@ class MockTokenToKVPoolAllocator:
         start = self._next_idx
         self._next_idx += num_tokens
         if self._next_idx > self._total:
-            raise RuntimeError(
-                f"No free tokens: need {num_tokens}, "
-                f"only {self._total - start} remaining"
-            )
+            self._next_idx = start  # rollback — matches real alloc behavior
+            return None
         return torch.arange(start, start + num_tokens, dtype=torch.int64)
 
     def free(self, indices) -> None:
@@ -252,19 +254,25 @@ class SGLangBackend(KVBackend):
     def total_bytes(self) -> int:
         """Total KV cache bytes.
 
-        Reads framework-agnostic KVGroupInfo from the shared config.
-        SGLang-specific adjustment: deepseek_v4_hook.py:57 sets
-        swa_full_tokens_ratio=0.1, so SWA ring uses 10% density.
-        No vllm imports or types.
+        SWA portion uses the real SGLang pool_configurator logic:
+          swa_tokens = align(full_tokens * swa_ratio, page_size)
+        where full_tokens = blocks * scheduler_block_size (the shared
+        token budget) and swa_ratio=0.1 (deepseek_v4_hook.py:57).
         """
         blocks = self._backend_config.num_kv_cache_blocks
+        page_size = self._page_size
+        scheduler_bs = self._backend_config.scheduler_block_size
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
-            group_bytes = info.layer_count * blocks * info.page_bytes
             if info.name == "swa":
-                # pool_configurator.py:623: int(full_token * swa_ratio)
-                # Apply 0.1 once per group, not per-page.
-                group_bytes = int(group_bytes * 0.1)
+                # pool_configurator.py:313-314,407:
+                # swa_tokens = align(int(full_tokens * ratio), page_size)
+                full_tokens = blocks * scheduler_bs
+                swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
+                per_token = info.page_bytes // info.block_size
+                group_bytes = swa_tokens * per_token * info.layer_count
+            else:
+                group_bytes = info.layer_count * blocks * info.page_bytes
             total += group_bytes
         return total
 

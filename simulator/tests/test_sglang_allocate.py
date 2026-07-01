@@ -1,7 +1,14 @@
 """P1 regression test: SGLang allocate_slots must not double-allocate."""
 
+import importlib.util
 import math
 import unittest
+
+_HAS_SGLANG = importlib.util.find_spec("sglang") is not None
+_HAS_TORCH = importlib.util.find_spec("torch") is not None
+requires_sglang = unittest.skipUnless(
+    _HAS_SGLANG and _HAS_TORCH, "requires sglang+torch"
+)
 
 from simulator.config.model_config import (
     KVBackendConfig,
@@ -29,6 +36,7 @@ def _make_backend(num_blocks=128):
     return SGLangBackend(bc)
 
 
+@requires_sglang
 class TestAllocateSlots(unittest.TestCase):
     """P1: allocate_slots must allocate exactly num_new_tokens."""
 
