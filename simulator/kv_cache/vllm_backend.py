@@ -56,8 +56,10 @@ class vLLMBackend(KVBackend):
             max_tokens=max_tokens,
         )
 
-    def add_request(self, sim_req: "vLLMSimRequest") -> None:
-        """Build the real vllm Request and register it."""
+    def register_request(self, sim_req: "vLLMSimRequest") -> None:
+        """Build the real vllm Request (idempotent — safe on retry)."""
+        if sim_req._vllm_request is not None:
+            return  # already registered
         from vllm.sampling_params import SamplingParams
 
         sampling_params = SamplingParams(max_tokens=sim_req.max_tokens)
@@ -72,6 +74,9 @@ class vLLMBackend(KVBackend):
             pooling_params=None,
             block_hasher=self._block_hasher,
         )
+
+    # Keep old name for backward compat during transition
+    add_request = register_request
 
     def get_computed_blocks(
         self, sim_req: "vLLMSimRequest"
@@ -93,6 +98,17 @@ class vLLMBackend(KVBackend):
             num_new_computed_tokens=num_new_computed_tokens,
             new_computed_blocks=new_computed_blocks,
         )
+
+    def set_spec_tokens(
+        self, sim_req: "vLLMSimRequest", tokens: list[int]
+    ) -> None:
+        sim_req.spec_token_ids = tokens
+
+    def sync_state(
+        self, sim_req: "vLLMSimRequest", output_token_ids: list[int]
+    ) -> None:
+        sim_req.output_token_ids = output_token_ids
+        sim_req.sync_to_vllm()
 
     def free(self, sim_req: "vLLMSimRequest") -> None:
         if sim_req._vllm_request is not None:

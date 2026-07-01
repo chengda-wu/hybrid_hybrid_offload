@@ -129,10 +129,8 @@ class SimulatorScheduler:
         """
         backend = self._backend
 
-        # Register with backend once (avoid re-creating Request on retry)
-        if not getattr(req, "_registered", False):
-            backend.add_request(req.backend_req)
-            req._registered = True
+        # Register with backend (idempotent — safe on retry)
+        backend.register_request(req.backend_req)
 
         # Find prefix cache hits
         blocks, num_computed = backend.get_computed_blocks(req.backend_req)
@@ -189,8 +187,7 @@ class SimulatorScheduler:
 
         # 2. Set spec tokens on backend handle
         req.spec_token_ids = spec_tokens
-        if req.backend_req is not None and hasattr(req.backend_req, "spec_token_ids"):
-            req.backend_req.spec_token_ids = spec_tokens
+        self._backend.set_spec_tokens(req.backend_req, spec_tokens)
 
         # 3. Loaded = what's already in cache; Computed = 1+K for this step
         loaded = req.num_computed_tokens
@@ -230,11 +227,7 @@ class SimulatorScheduler:
         # only accepted tokens, not pending draft tokens)
         req.clear_spec_tokens()
 
-        if req.backend_req is not None and hasattr(req.backend_req, "output_token_ids"):
-            req.backend_req.output_token_ids = req.output_token_ids
-            sync_fn = getattr(req.backend_req, "sync_to_vllm", None)
-            if sync_fn is not None:
-                sync_fn()
+        self._backend.sync_state(req.backend_req, req.output_token_ids)
 
         req.num_accepted_spec_tokens += num_accepted
         req.num_rejected_spec_tokens += num_rejected

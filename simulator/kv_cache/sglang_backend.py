@@ -108,9 +108,11 @@ class SGLangBackend(KVBackend):
             max_tokens=max_tokens,
         )
 
-    def add_request(self, sim_req: "SGLangSimRequest") -> None:
+    def register_request(self, sim_req: "SGLangSimRequest") -> None:
         """No-op for SGLang — insertion happens in allocate_slots."""
         pass
+
+    add_request = register_request  # backward compat
 
     def get_computed_blocks(self, sim_req: "SGLangSimRequest") -> tuple[Any, int]:
         """Match prefix via RadixCache.match_prefix.
@@ -177,6 +179,16 @@ class SGLangBackend(KVBackend):
 
         return new_indices
 
+    def set_spec_tokens(
+        self, sim_req: "SGLangSimRequest", tokens: list[int]
+    ) -> None:
+        sim_req.spec_token_ids = tokens
+
+    def sync_state(
+        self, sim_req: "SGLangSimRequest", output_token_ids: list[int]
+    ) -> None:
+        sim_req.output_token_ids = output_token_ids
+
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Mark request's cache entries as evictable.
 
@@ -208,44 +220,25 @@ class SGLangBackend(KVBackend):
 
     @property
     def total_bytes(self) -> int:
-        """Total KV cache bytes, computed per-group with correct per-token cost.
+        """Total KV cache bytes.
 
-        DeepSeek V4 groups have different per-token byte costs:
-          - SWA / C4 MLA / C128 MLA: 584 bytes/token (fp8_ds_mla KV)
-          - C4/C128 Compressor: float32 state (different dims per type)
-          - C4 Indexer: 132 bytes/token (fp8 + fp32 scales)
+        Reuses VLLMConfig._build_groups to construct the same KVCacheGroupSpecs
+        that vLLM uses, then sums their page_size_bytes.  The only difference:
+        SGLang's deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1, so SWA
+        ring buffer uses 10% of full-density memory.
         """
-        arch = self._backend_config.model_arch
+        from simulator.config.model_config import VLLMConfig
+
+        groups = VLLMConfig._build_groups(self._backend_config)
+        blocks = self._backend_config.num_kv_cache_blocks
         total = 0
-
-        if arch.is_mla and arch.compress_ratios is not None:
-            c4_layers = sum(1 for cr in arch.compress_ratios if cr == 4)
-            c128_layers = sum(1 for cr in arch.compress_ratios if cr == 128)
-            blocks = self._backend_config.num_kv_cache_blocks
-
-            # SWA: 64 tokens/block, 584 B/token, all 43 layers.
-            # SGLang deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1,
-            # so SWA ring buffer uses only 10% of full-density memory.
-            total += int(arch.num_layers * blocks * 64 * 584 * 0.1)
-            # C4 MLA: 64 effective tokens/block, 584 B/token
-            total += c4_layers * blocks * 64 * 584
-            # C128 MLA: 2 effective tokens/block, 584 B/token
-            total += c128_layers * blocks * 2 * 584
-            # C4 Compressor: 4 tokens/block, float32, state_dim=2048
-            total += c4_layers * blocks * 4 * 2048 * 4
-            # C128 Compressor: 8 tokens/block, float32, state_dim=1024
-            total += c128_layers * blocks * 8 * 1024 * 4
-            # C4 Indexer: 64 effective tokens/block, 132 B/token
-            total += c4_layers * blocks * 64 * 132
-        else:
-            dtype_size = 2
-            per_token = 2 * arch.num_kv_heads * arch.head_size * dtype_size
-            total = (
-                self._backend_config.num_kv_cache_blocks
-                * self._backend_config.block_size
-                * per_token
-                * arch.num_layers
-            )
+        for g in groups:
+            layer_count = len(g.layer_names)
+            page_bytes = g.kv_cache_spec.page_size_bytes
+            if g.kv_cache_spec.block_size == 64:
+                # SWA ring: SGLang uses 10% density
+                page_bytes = int(page_bytes * 0.1)
+            total += layer_count * blocks * page_bytes
 
         return total
 

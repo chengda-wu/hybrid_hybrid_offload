@@ -25,10 +25,9 @@ class KVBackend(ABC):
         ...
 
     @abstractmethod
-    def add_request(self, sim_req: Any) -> None:
-        """Register a new request with the backend.
-
-        Called when the request transitions from QUEUED to PRE_FILL.
+    def register_request(self, sim_req: Any) -> None:
+        """Register a new request with the backend.  Idempotent — safe
+        to call multiple times (e.g. on prefill retry).
         """
         ...
 
@@ -55,6 +54,16 @@ class KVBackend(ABC):
 
         Returns backend-specific allocation or None on failure.
         """
+        ...
+
+    @abstractmethod
+    def set_spec_tokens(self, sim_req: Any, tokens: list[int]) -> None:
+        """Push speculative draft token IDs to the backend handle."""
+        ...
+
+    @abstractmethod
+    def sync_state(self, sim_req: Any, output_token_ids: list[int]) -> None:
+        """Sync accepted output tokens to the backend after a decode step."""
         ...
 
     @abstractmethod
