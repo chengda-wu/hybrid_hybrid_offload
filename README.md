@@ -9,12 +9,14 @@
 ### 快速开始
 
 ```bash
-# 1. 初始化 submodule（获取 vllm/sglang 源码）
+# 1. 初始化 submodule + 创建 venv
 git submodule update --init --recursive
+uv venv --python 3.12
+source .venv/bin/activate
 
-# 2. 安装依赖（Python 3.12+）
-pip install -e 3rdparty/vllm     # vLLM editable install
-pip install -e 3rdparty/sglang   # SGLang editable install
+# 2. 安装 vllm / sglang（editable install from submodule）
+VLLM_USE_PRECOMPILED=1 uv pip install -e 3rdparty/vllm
+uv pip install -e 3rdparty/sglang/python
 
 # 3. 运行仿真
 python -m simulator.run --backend vllm --num-requests 20

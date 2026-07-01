@@ -37,20 +37,20 @@ def main(argv: list[str] | None = None) -> int:
                     shared_prefix_ratio=args.shared_prefix_ratio,
                 )
             ),
+            speculative=SpeculativeDecodeConfig(
+                enabled=args.num_spec_tokens > 0,
+                num_spec_tokens=args.num_spec_tokens,
+                accept_mode=args.accept_mode,
+                acceptance_rate=args.acceptance_rate,
+                acceptance_rates=args.acceptance_rates,
+                draft_accuracy=args.draft_accuracy,
+            ),
             model_config_path=args.model_config,
             kv_cache_block_size=args.kv_block_size,
             max_model_len=args.max_model_len,
             num_kv_cache_blocks=args.num_kv_blocks,
             random_seed=args.seed,
             verbose=args.verbose,
-        )
-        config.speculative = SpeculativeDecodeConfig(
-            enabled=args.num_spec_tokens > 0,
-            num_spec_tokens=args.num_spec_tokens,
-            accept_mode=args.accept_mode,
-            acceptance_rate=args.acceptance_rate,
-            acceptance_rates=args.acceptance_rates,
-            draft_accuracy=args.draft_accuracy,
         )
         if args.gpu_data_points:
             config.gpu_perf = GPUPerfConfig(data_points=args.gpu_data_points)
