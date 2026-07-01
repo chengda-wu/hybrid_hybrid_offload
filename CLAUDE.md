@@ -4,16 +4,31 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Installation & running
 
-```bash
-# venv is pre-created with vllm + sglang editable installs from 3rdparty/
-source .venv/bin/activate
+The environment may or may not be set up.  Check first:
 
-# Run simulation
+```bash
+# Check what's available
+python3 -c "import vllm" 2>/dev/null && echo "vllm: OK" || echo "vllm: NOT INSTALLED"
+python3 -c "import sglang" 2>/dev/null && echo "sglang: OK" || echo "sglang: NOT INSTALLED"
+ls 3rdparty/vllm/vllm/ 2>/dev/null && echo "submodule vllm: OK" || echo "submodule vllm: EMPTY — run: git submodule update --init"
+```
+
+If not set up:
+
+```bash
+git submodule update --init --recursive
+uv venv --python 3.12
+source .venv/bin/activate
+VLLM_USE_PRECOMPILED=1 uv pip install -e 3rdparty/vllm
+uv pip install -e 3rdparty/sglang/python
+```
+
+Run the simulation:
+
+```bash
 .venv/bin/python -m simulator.run --backend vllm --num-requests 20
 .venv/bin/python -m simulator.run --backend sglang --num-requests 20
 ```
-
-**Do NOT run `pip install`** without asking — the venv is already set up with vllm/sglang from the submodules.
 
 ## Architecture
 
