@@ -76,6 +76,34 @@ class TestAllocateSlots(unittest.TestCase):
         self.assertEqual(len(indices), remaining,
                          f"expected {remaining}, got {len(indices)}")
 
+    def test_cache_hit_sync_state_value_equals_key_length(self):
+        """After cache-hit prefill, sync_state must build value == key length."""
+        backend = _make_backend()
+        prompt = list(range(512))
+        # First request: populate the cache
+        req1 = backend.create_request("r1", prompt, max_tokens=10)
+        backend.register_request(req1)
+        backend.allocate_slots(req1, num_new_tokens=512)
+        backend.sync_state(req1, [])
+
+        # Second request: shares prefix, cache hit
+        req2 = backend.create_request("r2", prompt, max_tokens=10)
+        backend.register_request(req2)
+        blocks, num_computed = backend.get_computed_blocks(req2)
+        self.assertGreaterEqual(num_computed, 256)
+
+        remaining = 512 - num_computed
+        backend.allocate_slots(
+            req2, num_new_tokens=remaining,
+            num_new_computed_tokens=num_computed,
+            new_computed_blocks=blocks,
+        )
+        # This is the critical path — sync_state after cache-hit prefill.
+        # Before the fix, value was shorter than key (prefix indices missing).
+        # After the fix, _allocated_indices = [prefix, new] → value == key.
+        backend.sync_state(req2, [])
+        # No exception raised → value length matched key length.
+
     def test_sync_state_key_includes_bonus_token(self):
         backend = _make_backend()
         req = backend.create_request("r1", list(range(512)), max_tokens=10)

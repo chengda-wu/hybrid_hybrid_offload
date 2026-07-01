@@ -144,6 +144,12 @@ class SGLangBackend(KVBackend):
 
         from sglang.srt.mem_cache.base_prefix_cache import EvictParams
 
+        # Prepend matched-prefix indices so sync_state can build
+        # prefix + new = full sequence (real SGLang req_to_token_pool
+        # holds the entire row).  Order must be prefix first, new second.
+        if new_computed_blocks is not None and len(new_computed_blocks) > 0:
+            sim_req._allocated_indices.append(new_computed_blocks)
+
         to_alloc = num_new_tokens
         if to_alloc <= 0:
             return torch.tensor([], dtype=torch.int64)
@@ -206,8 +212,12 @@ class SGLangBackend(KVBackend):
                 self._mock_allocator.free(flat_indices[key_len:])
                 # Keep only the inserted portion for next re-insert
                 sim_req._allocated_indices = [values]
-        elif len(flat_indices) > 0:
-            self._cache.insert(InsertParams(key=key, value=flat_indices.clone()))
+        else:
+            raise RuntimeError(
+                f"sync_state: flat_indices ({len(flat_indices)}) shorter "
+                f"than key ({key_len}).  Prefix indices may not have been "
+                f"tracked in _allocated_indices."
+            )
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Mark request's cache entries as evictable.
