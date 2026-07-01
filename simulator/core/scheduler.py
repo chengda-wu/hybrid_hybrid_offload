@@ -139,7 +139,6 @@ class SimulatorScheduler:
         loaded = num_computed  # cache-hit tokens are "loaded" from cache
         req.num_computed_tokens = num_computed
         req.num_cache_hits_on_prefill = num_computed
-        req.total_computed_tokens_ever = num_computed
 
         # Allocate remaining prompt tokens
         num_new_tokens = req.num_tokens - num_computed
@@ -157,7 +156,6 @@ class SimulatorScheduler:
 
         req.allocated_blocks = allocated
         req.num_computed_tokens = req.num_tokens
-        req.total_computed_tokens_ever += num_new_tokens
         req.num_prefill_tokens = num_new_tokens
 
         # Transition to decode

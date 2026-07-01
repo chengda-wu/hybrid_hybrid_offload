@@ -143,8 +143,11 @@ class SGLangBackend(KVBackend):
         from sglang.srt.mem_cache.base_prefix_cache import EvictParams, InsertParams
         from sglang.srt.mem_cache.radix_cache import RadixKey
 
-        # Total tokens after this step
-        needed = sim_req.num_tokens + num_new_tokens
+        # Total tokens after this step.
+        # Use prompt+output (NOT num_tokens which includes spec) to avoid
+        # double-counting spec tokens that are already in num_new_tokens.
+        num_existing = len(sim_req.prompt_token_ids) + len(sim_req.output_token_ids)
+        needed = num_existing + num_new_tokens
         current = num_new_computed_tokens
         to_alloc = needed - current
         if to_alloc <= 0:
@@ -163,12 +166,11 @@ class SGLangBackend(KVBackend):
         # Track all allocated indices for this request (fix leak in free())
         sim_req._allocated_indices.append(new_indices)
 
-        # Insert the full token sequence into the radix tree
+        # Insert into the radix tree — use prompt+output only (no spec
+        # tokens, which may be rejected and would pollute the tree).
         all_tokens = array(
             "q",
-            sim_req.prompt_token_ids
-            + sim_req.output_token_ids
-            + sim_req.spec_token_ids,
+            sim_req.prompt_token_ids + sim_req.output_token_ids,
         )
         key = RadixKey(token_ids=all_tokens[:needed])
         self._cache.insert(InsertParams(key=key, value=new_indices))
@@ -193,11 +195,11 @@ class SGLangBackend(KVBackend):
 
     @property
     def num_free_blocks(self) -> int:
-        return self._mock_allocator.available_size()
+        return self._mock_allocator.available_size()  # token slots, not blocks
 
     @property
     def total_blocks(self) -> int:
-        return self._mock_allocator._total
+        return self._mock_allocator._total  # token slots, not blocks
 
     @property
     def total_bytes(self) -> int:
@@ -216,8 +218,10 @@ class SGLangBackend(KVBackend):
             c128_layers = sum(1 for cr in arch.compress_ratios if cr == 128)
             blocks = self._backend_config.num_kv_cache_blocks
 
-            # SWA: 64 tokens/block, 584 B/token, all 43 layers
-            total += arch.num_layers * blocks * 64 * 584
+            # SWA: 64 tokens/block, 584 B/token, all 43 layers.
+            # SGLang deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1,
+            # so SWA ring buffer uses only 10% of full-density memory.
+            total += int(arch.num_layers * blocks * 64 * 584 * 0.1)
             # C4 MLA: 64 effective tokens/block, 584 B/token
             total += c4_layers * blocks * 64 * 584
             # C128 MLA: 2 effective tokens/block, 584 B/token

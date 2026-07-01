@@ -35,7 +35,6 @@ class SimRequestState:
     output_token_ids: list[int] = field(default_factory=list)
     spec_token_ids: list[int] = field(default_factory=list)
     num_computed_tokens: int = 0
-    total_computed_tokens_ever: int = 0  # cumulative for "loaded tokens" in perf model
 
     # ---- Timing ----
 
@@ -82,7 +81,6 @@ class SimRequestState:
     def advance_computed_tokens(self, n: int) -> None:
         """Advance num_computed_tokens (mimics _update_after_schedule)."""
         self.num_computed_tokens += n
-        self.total_computed_tokens_ever += n
 
     def subtract_rejected_tokens(self, n: int) -> None:
         """Subtract rejected spec tokens (mimics update_from_output)."""

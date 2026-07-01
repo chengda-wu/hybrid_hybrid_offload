@@ -35,8 +35,10 @@ class SyntheticDataGenerator:
     # Token ID range for synthetic data (roughly LLaMA vocabulary size).
     VOCAB_SIZE = 128256
 
-    def __init__(self, config: SyntheticConfig, seed: int = 42):
+    def __init__(self, config: SyntheticConfig, seed: int = 42,
+                 arrival_config=None):
         self._config = config
+        self._arrival = arrival_config
         self._rng = random.Random(seed)
         self._shared_prefix: list[int] | None = None
 
@@ -120,10 +122,22 @@ class SyntheticDataGenerator:
             return min(self._config.shared_prefix_length, prompt_len)
         return int(prompt_len * self._config.shared_prefix_ratio)
 
-    @staticmethod
-    def _compute_arrival_time(index: int) -> float:
-        """Staggered arrival times in *milliseconds* (matching _sim_time unit)."""
+    def _compute_arrival_time(self, index: int) -> float:
+        """Arrival time in ms (matching _sim_time unit)."""
         if index == 0:
             return 0.0
-        # 10 ms gaps between arrivals (in ms, matching _sim_time unit)
-        return index * 10.0
+        if self._arrival is None:
+            return index * 10.0  # default 10ms stagger
+
+        pattern = self._arrival.arrival_pattern
+        if pattern == "burst":
+            return 0.0
+        elif pattern == "poisson":
+            # Exponential inter-arrival: mean = 1000/rate ms
+            if index == 1:
+                self._next_arrival = 0.0
+            gap = self._rng.expovariate(self._arrival.poisson_rate)
+            self._next_arrival += gap * 1000.0  # seconds → ms
+            return self._next_arrival
+        else:  # staggered
+            return index * self._arrival.stagger_delay_steps * 10.0

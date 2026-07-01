@@ -118,9 +118,17 @@ class vLLMBackend(KVBackend):
 
     @property
     def total_bytes(self) -> int:
-        """Sum of all kv_cache_tensor sizes — the real allocation including
-        vLLM's block padding and hybrid group layout."""
-        return sum(t.size for t in self._manager.kv_cache_config.kv_cache_tensors)
+        """Total KV cache allocation.
+
+        Uses _bucket_layers_by_page_size (same as vLLM's _get_kv_cache_config_packed)
+        to compute bytes_per_block, then multiplies by num_blocks.
+        """
+        cfg = self._manager.kv_cache_config
+        from vllm.v1.core.kv_cache_utils import _bucket_layers_by_page_size
+
+        buckets = _bucket_layers_by_page_size(cfg.kv_cache_groups)
+        bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
+        return cfg.num_blocks * bytes_per_block
 
     @property
     def name(self) -> str:

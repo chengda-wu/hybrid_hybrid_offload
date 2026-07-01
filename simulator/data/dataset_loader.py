@@ -24,8 +24,11 @@ class DatasetLoader:
     def load(self) -> list[RequestData]:
         """Return all request data."""
         if self._config.source == "synthetic":
+            from simulator.config.simulator_config import RequestArrivalConfig
+
+            arrival = getattr(self._config, "arrival", None)
             generator = SyntheticDataGenerator(
-                self._config.synthetic, seed=self._seed
+                self._config.synthetic, seed=self._seed, arrival_config=arrival,
             )
             return generator.generate()
         else:
