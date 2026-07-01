@@ -17,18 +17,18 @@ class DatasetLoader:
         {"prompt_token_ids": [1,2,3], "completion_token_ids": [4,5,6]}
     """
 
-    def __init__(self, config: DatasetConfig, seed: int = 42):
+    def __init__(self, config: DatasetConfig, seed: int = 42,
+                 arrival_config=None):
         self._config = config
         self._seed = seed
+        self._arrival = arrival_config
 
     def load(self) -> list[RequestData]:
         """Return all request data."""
         if self._config.source == "synthetic":
-            from simulator.config.simulator_config import RequestArrivalConfig
-
-            arrival = getattr(self._config, "arrival", None)
             generator = SyntheticDataGenerator(
-                self._config.synthetic, seed=self._seed, arrival_config=arrival,
+                self._config.synthetic, seed=self._seed,
+                arrival_config=self._arrival,
             )
             return generator.generate()
         else:

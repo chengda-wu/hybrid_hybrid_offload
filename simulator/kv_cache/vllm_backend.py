@@ -75,8 +75,6 @@ class vLLMBackend(KVBackend):
             block_hasher=self._block_hasher,
         )
 
-    # Keep old name for backward compat during transition
-    add_request = register_request
 
     def get_computed_blocks(
         self, sim_req: "vLLMSimRequest"

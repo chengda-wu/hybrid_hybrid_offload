@@ -93,7 +93,10 @@ class SimulationEngine:
         )
 
         # Load data
-        loader = DatasetLoader(self._config.dataset, seed=self._config.random_seed)
+        loader = DatasetLoader(
+            self._config.dataset, seed=self._config.random_seed,
+            arrival_config=self._config.arrival,
+        )
         request_datas = loader.load()
 
         # Build SimRequestStates

@@ -41,6 +41,7 @@ class SyntheticDataGenerator:
         self._arrival = arrival_config
         self._rng = random.Random(seed)
         self._shared_prefix: list[int] | None = None
+        self._next_arrival: float = 0.0
 
     def generate(self) -> list[RequestData]:
         """Generate all synthetic requests."""

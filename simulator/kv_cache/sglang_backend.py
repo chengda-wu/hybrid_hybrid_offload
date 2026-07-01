@@ -112,7 +112,6 @@ class SGLangBackend(KVBackend):
         """No-op for SGLang — insertion happens in allocate_slots."""
         pass
 
-    add_request = register_request  # backward compat
 
     def get_computed_blocks(self, sim_req: "SGLangSimRequest") -> tuple[Any, int]:
         """Match prefix via RadixCache.match_prefix.
