@@ -156,6 +156,9 @@ class SimulatorScheduler:
         req.num_computed_tokens = req.num_tokens
         req.num_prefill_tokens = num_new_tokens
 
+        # Insert prefill tokens into radix tree (SGLang: cache_unfinished_req)
+        backend.sync_state(req.backend_req, [])
+
         # Transition to decode
         req.status = RequestStatus.DECODING
         if self._verbose:

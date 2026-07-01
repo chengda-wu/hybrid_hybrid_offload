@@ -136,26 +136,19 @@ class SGLangBackend(KVBackend):
         num_new_computed_tokens: int = 0,
         new_computed_blocks: Any | None = None,
     ) -> Any | None:
-        """Allocate token slots and insert into the radix tree.
+        """Allocate token slots from the mock pool.  No radix tree insert.
 
-        Returns newly allocated indices tensor or None on failure.
+        Insert happens in sync_state() after accepted tokens are known,
+        mirroring real SGLang's cache_unfinished_req (radix_cache.py:494).
         """
         import torch
 
-        from sglang.srt.mem_cache.base_prefix_cache import EvictParams, InsertParams
-        from sglang.srt.mem_cache.radix_cache import RadixKey
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
 
-        # Total tokens after this step.
-        # Use prompt+output (NOT num_tokens which includes spec) to avoid
-        # double-counting spec tokens that are already in num_new_tokens.
-        num_existing = len(sim_req.prompt_token_ids) + len(sim_req.output_token_ids)
-        needed = num_existing + num_new_tokens
-        current = num_new_computed_tokens
-        to_alloc = needed - current
+        to_alloc = num_new_tokens
         if to_alloc <= 0:
             return torch.tensor([], dtype=torch.int64)
 
-        # Evict if needed
         if self._mock_allocator.available_size() < to_alloc:
             deficit = to_alloc - self._mock_allocator.available_size()
             self._cache.evict(EvictParams(num_tokens=deficit))
@@ -164,19 +157,7 @@ class SGLangBackend(KVBackend):
             return None
 
         new_indices = self._mock_allocator.allocate(to_alloc)
-
-        # Track all allocated indices for this request (fix leak in free())
         sim_req._allocated_indices.append(new_indices)
-
-        # Insert into the radix tree — use prompt+output only (no spec
-        # tokens, which may be rejected and would pollute the tree).
-        all_tokens = array(
-            "q",
-            sim_req.prompt_token_ids + sim_req.output_token_ids,
-        )
-        key = RadixKey(token_ids=all_tokens[:needed])
-        self._cache.insert(InsertParams(key=key, value=new_indices))
-
         return new_indices
 
     def set_spec_tokens(
@@ -187,7 +168,47 @@ class SGLangBackend(KVBackend):
     def sync_state(
         self, sim_req: "SGLangSimRequest", output_token_ids: list[int]
     ) -> None:
-        sim_req.output_token_ids = output_token_ids
+        """Insert accepted tokens into the radix tree, then free excess indices.
+
+        Mirrors real SGLang's cache_unfinished_req (radix_cache.py:494-515):
+        key = RadixKey(prompt+output).page_aligned(page_size)
+        values = allocated_indices[:len(key)]
+        free(allocated_indices[len(key):])
+        """
+        import torch
+
+        from sglang.srt.mem_cache.base_prefix_cache import InsertParams
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+
+        sim_req.output_token_ids = list(output_token_ids)
+
+        all_tokens = array(
+            "q", sim_req.prompt_token_ids + sim_req.output_token_ids
+        )
+        key = RadixKey(token_ids=all_tokens).page_aligned(self._page_size)
+        key_len = len(key)
+
+        # Gather all allocated indices and flatten.
+        # Keep accumulated indices across steps (real SGLang re-inserts
+        # the full kv_indices each call to cache_unfinished_req).
+        flat_indices = torch.cat(
+            [t for t in sim_req._allocated_indices if len(t) > 0]
+        ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
+
+        if len(flat_indices) >= key_len:
+            # value length == key length (real SGLang contract:
+            # kv_indices[:len(radix_key)])
+            values = flat_indices[:key_len].clone()
+            self._cache.insert(InsertParams(key=key, value=values))
+            # Free rejected spec slots + unaligned tail
+            # (radix_cache.py: free(kv_indices[cache_protected_len:key_len])
+            #  + free(kv_indices[key_len:]))
+            if len(flat_indices) > key_len:
+                self._mock_allocator.free(flat_indices[key_len:])
+                # Keep only the inserted portion for next re-insert
+                sim_req._allocated_indices = [values]
+        elif len(flat_indices) > 0:
+            self._cache.insert(InsertParams(key=key, value=flat_indices.clone()))
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Mark request's cache entries as evictable.
