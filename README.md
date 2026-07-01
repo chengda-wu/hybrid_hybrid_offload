@@ -9,12 +9,14 @@
 ### 快速开始
 
 ```bash
-# 安装依赖（需要 Python 3.12+）
-# vllm 和 sglang 需要单独安装，仓库不自带依赖管理：
-pip install -e /path/to/vllm    # vLLM editable install
-pip install -e /path/to/sglang  # SGLang editable install
+# 1. 初始化 submodule（获取 vllm/sglang 源码）
+git submodule update --init --recursive
 
-# 运行仿真
+# 2. 安装依赖（Python 3.12+）
+pip install -e 3rdparty/vllm     # vLLM editable install
+pip install -e 3rdparty/sglang   # SGLang editable install
+
+# 3. 运行仿真
 python -m simulator.run --backend vllm --num-requests 20
 ```
 
