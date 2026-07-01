@@ -51,6 +51,7 @@ class GPUPerfModel:
         self._c: float = 0.0
         self._d: float = 0.0
         self._fitted = False
+        self._warned_negative = False
         self._fit()
 
     def _fit(self) -> None:
@@ -166,9 +167,20 @@ class GPUPerfModel:
             + self._c * loaded_tokens * computed_tokens
             + self._d
         )
-        # Floor at 0 — latency cannot be negative even if fitted
-        # coefficients produce a small negative value for tiny loads.
-        return max(0.0, latency)
+        if latency < 0:
+            if not self._warned_negative:
+                import logging
+                _log = logging.getLogger(__name__)
+                _log.warning(
+                    "GPU perf model predicted negative latency (%.4f ms) for "
+                    "loaded=%d computed=%d — floor to 0.  Consider adding data "
+                    "points near the origin (e.g. [0, 1, <latency>]) to anchor "
+                    "the fit.  (This warning is printed once.)",
+                    latency, loaded_tokens, computed_tokens,
+                )
+                self._warned_negative = True
+            latency = 0.0
+        return latency
 
     @property
     def coefficients(self) -> tuple[float, float, float, float]:

@@ -178,11 +178,16 @@ class SGLangBackend(KVBackend):
         return new_indices
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
-        """Free all token slots ever allocated for this request."""
-        for indices in sim_req._allocated_indices:
-            if len(indices) > 0:
-                self._mock_allocator.free(indices)
-        sim_req._allocated_indices.clear()
+        """Mark request's cache entries as evictable.
+
+        Does NOT directly free KV indices.  Like real SGLang, only evict()
+        calls allocator.free().  This avoids double-free when evict() and
+        free() both try to release the same tree node's value.
+        """
+        # Real SGLang: dec_lock_ref on last_node.  Our simulation doesn't
+        # track lock_ref (all nodes are lock_ref=0), so free() is a no-op.
+        # Indices are freed lazily by evict() under memory pressure.
+        pass
 
     def reset(self) -> None:
         self._cache.reset()
