@@ -222,14 +222,12 @@ class SGLangBackend(KVBackend):
     def total_bytes(self) -> int:
         """Total KV cache bytes.
 
-        Reuses VLLMConfig._build_groups to construct the same KVCacheGroupSpecs
-        that vLLM uses, then sums their page_size_bytes.  The only difference:
-        SGLang's deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1, so SWA
+        Uses the shared _build_kv_cache_groups() to get KVCacheGroupSpecs,
+        then sums page_size_bytes per group.  SGLang-specific adjustment:
+        deepseek_v4_hook.py:57 sets swa_full_tokens_ratio=0.1, so SWA
         ring buffer uses 10% of full-density memory.
         """
-        from simulator.config.model_config import VLLMConfig
-
-        groups = VLLMConfig._build_groups(self._backend_config)
+        groups = self._backend_config.build_kv_cache_groups()
         blocks = self._backend_config.num_kv_cache_blocks
         total = 0
         for g in groups:

@@ -229,6 +229,14 @@ class KVBackendConfig:
         """Number of KV cache groups (derived from layer_groups)."""
         return len(self.model_arch.layer_groups)
 
+    def build_kv_cache_groups(self) -> list["KVCacheGroupSpec"]:
+        """Build KVCacheGroupSpecs from the model architecture.
+
+        Shared by both vLLM and SGLang backends — this is a model description,
+        not framework-specific logic.
+        """
+        return _build_kv_cache_groups(self)
+
 
 # ---------------------------------------------------------------------------
 # vLLM-specific config builder
@@ -258,7 +266,7 @@ class VLLMConfig:
 
         # Build group specs (same as before — spec construction is our
         # responsibility since we're simulating a model, not loading one).
-        kv_cache_groups = cls._build_groups(bc)
+        kv_cache_groups = bc.build_kv_cache_groups()
 
         # Use vLLM's _bucket_layers_by_page_size + _get_kv_cache_config_packed
         # to compute correct tensor sizes for the shared block pool.
@@ -287,115 +295,112 @@ class VLLMConfig:
             )
         )
 
-    @staticmethod
-    def _build_groups(bc: "KVBackendConfig") -> list["KVCacheGroupSpec"]:
-        """Build KVCacheGroupSpecs for the model.
+def _build_kv_cache_groups(bc: KVBackendConfig) -> list["KVCacheGroupSpec"]:
+    """Build KVCacheGroupSpecs from the model architecture.
 
-        Tensor sizing is delegated to vLLM's get_kv_cache_config_from_groups.
-        """
-        import torch as _torch
+    Shared by both vLLM and SGLang backends.  Tensor sizing is handled
+    separately by each backend (vLLM delegates to _get_kv_cache_config_packed,
+    SGLang uses page_size_bytes directly).
+    """
+    import torch as _torch
 
-        from vllm.v1.kv_cache_interface import (
-            KVCacheGroupSpec,
-            MLAAttentionSpec,
-            SlidingWindowMLASpec,
-        )
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheGroupSpec,
+        MLAAttentionSpec,
+        SlidingWindowMLASpec,
+    )
 
-        arch = bc.model_arch
+    arch = bc.model_arch
 
-        if not arch.is_mla or arch.compress_ratios is None:
-            # Uniform model
-            layer_names = [f"model.layers.{i}.self_attn" for i in range(arch.num_layers)]
-            return [KVCacheGroupSpec(layer_names, FullAttentionSpec(
-                block_size=bc.block_size,
-                num_kv_heads=arch.num_kv_heads,
-                head_size=arch.head_size,
-                dtype=getattr(_torch, arch.dtype),
-                sliding_window=arch.sliding_window,
-            ))]
+    if not arch.is_mla or arch.compress_ratios is None:
+        layer_names = [f"model.layers.{i}.self_attn" for i in range(arch.num_layers)]
+        return [KVCacheGroupSpec(layer_names, FullAttentionSpec(
+            block_size=bc.block_size,
+            num_kv_heads=arch.num_kv_heads,
+            head_size=arch.head_size,
+            dtype=getattr(_torch, arch.dtype),
+            sliding_window=arch.sliding_window,
+        ))]
 
-        # DSV4 dtype
-        kv_dtype = _torch.uint8  # fp8_ds_mla
-        cache_dtype_str = "fp8_ds_mla"
-        ratios = arch.compress_ratios
-        all_layers = list(range(arch.num_layers))
-        c4_layers = [i for i, cr in enumerate(ratios) if cr == 4]
-        c128_layers = [i for i, cr in enumerate(ratios) if cr == 128]
-        groups: list[KVCacheGroupSpec] = []
+    kv_dtype = _torch.uint8
+    cache_dtype_str = "fp8_ds_mla"
+    ratios = arch.compress_ratios
+    all_layers = list(range(arch.num_layers))
+    c4_layers = [i for i, cr in enumerate(ratios) if cr == 4]
+    c128_layers = [i for i, cr in enumerate(ratios) if cr == 128]
+    groups: list[KVCacheGroupSpec] = []
 
-        # 1. SWA — DeepseekV4SWACache (attention.py:290), all 43 layers
+    # 1. SWA (attention.py:290), all 43 layers
+    groups.append(KVCacheGroupSpec(
+        [f"model.layers.{i}.self_attn" for i in all_layers],
+        SlidingWindowMLASpec(
+            block_size=64, num_kv_heads=arch.num_kv_heads,
+            head_size=arch.head_size, dtype=kv_dtype,
+            sliding_window=arch.sliding_window or 128,
+            cache_dtype_str=cache_dtype_str, alignment=576,
+            model_version=bc.model_version,
+        )))
+
+    # 2. C4 Compressor (compressor.py:150,157-169)
+    if c4_layers:
+        coff = 2
         groups.append(KVCacheGroupSpec(
-            [f"model.layers.{i}.self_attn" for i in all_layers],
+            [f"model.layers.{i}.self_attn.compressor" for i in c4_layers],
             SlidingWindowMLASpec(
-                block_size=64, num_kv_heads=arch.num_kv_heads,
-                head_size=arch.head_size, dtype=kv_dtype,
-                sliding_window=arch.sliding_window or 128,
-                cache_dtype_str=cache_dtype_str,
-                alignment=576,
-                model_version=bc.model_version,
+                block_size=4, num_kv_heads=1,
+                head_size=2 * coff * arch.head_size,
+                dtype=_torch.float32,
+                sliding_window=coff * 4, alignment=576,
             )))
 
-        # 2. C4 Compressor (compressor.py:150,157-169) —
-        #    SlidingWindowMLASpec(bs=4, sw=8, head_size=state_dim, dtype=float32)
-        if c4_layers:
-            coff = 2  # compressor.py:141
-            groups.append(KVCacheGroupSpec(
-                [f"model.layers.{i}.self_attn.compressor" for i in c4_layers],
-                SlidingWindowMLASpec(
-                    block_size=4, num_kv_heads=1,
-                    head_size=2 * coff * arch.head_size,  # 2048
-                    dtype=_torch.float32,
-                    sliding_window=coff * 4, alignment=576,
-                )))
+    # 3. C128 Compressor (compressor.py:152,157-169)
+    if c128_layers:
+        coff = 1
+        groups.append(KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn.compressor" for i in c128_layers],
+            SlidingWindowMLASpec(
+                block_size=8, num_kv_heads=1,
+                head_size=2 * coff * arch.head_size,
+                dtype=_torch.float32,
+                sliding_window=coff * 128, alignment=576,
+            )))
 
-        # 3. C128 Compressor (compressor.py:152,157-169) —
-        #    SlidingWindowMLASpec(bs=8, sw=128, head_size=state_dim, dtype=float32)
-        if c128_layers:
-            coff = 1  # compressor.py:141
-            groups.append(KVCacheGroupSpec(
-                [f"model.layers.{i}.self_attn.compressor" for i in c128_layers],
-                SlidingWindowMLASpec(
-                    block_size=8, num_kv_heads=1,
-                    head_size=2 * coff * arch.head_size,  # 1024
-                    dtype=_torch.float32,
-                    sliding_window=coff * 128, alignment=576,
-                )))
+    # 4. Main MLA C4/C128 (attention.py:601-619)
+    if c4_layers:
+        groups.append(KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn" for i in c4_layers],
+            MLAAttentionSpec(
+                block_size=256, num_kv_heads=arch.num_kv_heads,
+                head_size=arch.head_size, dtype=kv_dtype,
+                compress_ratio=4, cache_dtype_str=cache_dtype_str,
+                alignment=576, model_version=bc.model_version,
+            )))
+    if c128_layers:
+        groups.append(KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn" for i in c128_layers],
+            MLAAttentionSpec(
+                block_size=256, num_kv_heads=arch.num_kv_heads,
+                head_size=arch.head_size, dtype=kv_dtype,
+                compress_ratio=128, cache_dtype_str=cache_dtype_str,
+                alignment=576, model_version=bc.model_version,
+            )))
 
-        # 4. Main MLA C4/C128 (attention.py:601-619)
-        if c4_layers:
-            groups.append(KVCacheGroupSpec(
-                [f"model.layers.{i}.self_attn" for i in c4_layers],
-                MLAAttentionSpec(
-                    block_size=256, num_kv_heads=arch.num_kv_heads,
-                    head_size=arch.head_size, dtype=kv_dtype,
-                    compress_ratio=4, cache_dtype_str=cache_dtype_str,
-                    alignment=576, model_version=bc.model_version,
-                )))
-        if c128_layers:
-            groups.append(KVCacheGroupSpec(
-                [f"model.layers.{i}.self_attn" for i in c128_layers],
-                MLAAttentionSpec(
-                    block_size=256, num_kv_heads=arch.num_kv_heads,
-                    head_size=arch.head_size, dtype=kv_dtype,
-                    compress_ratio=128, cache_dtype_str=cache_dtype_str,
-                    alignment=576, model_version=bc.model_version,
-                )))
+    # 5. C4 Indexer (attention.py:643-655, 729-732)
+    if c4_layers:
+        index_head_dim = 128
+        quant_block_size = 128
+        k_cache_head_dim = index_head_dim + index_head_dim // quant_block_size * 4
+        groups.append(KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn.k_cache" for i in c4_layers],
+            MLAAttentionSpec(
+                block_size=256, num_kv_heads=1,
+                head_size=k_cache_head_dim, dtype=_torch.uint8,
+                compress_ratio=4, cache_dtype_str=None,
+                alignment=576,
+            )))
 
-        # 5. C4 Indexer (attention.py:643-655, 729-732)
-        if c4_layers:
-            index_head_dim = 128
-            quant_block_size = 128
-            k_cache_head_dim = index_head_dim + index_head_dim // quant_block_size * 4
-            groups.append(KVCacheGroupSpec(
-                [f"model.layers.{i}.self_attn.k_cache" for i in c4_layers],
-                MLAAttentionSpec(
-                    block_size=256, num_kv_heads=1,
-                    head_size=k_cache_head_dim, dtype=_torch.uint8,
-                    compress_ratio=4, cache_dtype_str=None,
-                    alignment=576,
-                )))
-
-        return groups
+    return groups
 
 
 # ---------------------------------------------------------------------------
