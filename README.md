@@ -256,6 +256,7 @@ python -m simulator.run --config batch_experiment.json -o result.json
 
 ### 已知简化
 
+- **无测试覆盖**：当前无单元/集成测试，所有改动依赖人工 review 和 E2E 跑通做回归。已知漏洞（如 A2#2 SGLang free/evict 双重释放低压潜伏）无法被自动拦截。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
 - **无抢占**：分配失败时请求留在 PRE_FILL 状态重试，不会被换出。
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
