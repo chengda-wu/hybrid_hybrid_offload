@@ -175,12 +175,13 @@ class SGLangBackend(KVBackend):
     def sync_state(
         self, sim_req: "SGLangSimRequest", output_token_ids: list[int]
     ) -> None:
-        """Insert accepted tokens into the radix tree, then free excess indices.
+        """Insert page-aligned prefix into the radix tree.
 
         Mirrors real SGLang's cache_unfinished_req (radix_cache.py:494-515):
-        key = RadixKey(prompt+output).page_aligned(page_size)
-        values = allocated_indices[:len(key)]
-        free(allocated_indices[len(key):])
+        - key = RadixKey(prompt+output).page_aligned(page_size)
+        - values = kv_indices[:len(key)]  (insert only when value >= key)
+        - Unaligned tail is NOT freed — kept for next step (matches
+          real SGLang prefix_indices, radix_cache.py:542-544).
         """
         import torch
 
@@ -195,31 +196,39 @@ class SGLangBackend(KVBackend):
         key = RadixKey(token_ids=all_tokens).page_aligned(self._page_size)
         key_len = len(key)
 
-        # Gather all allocated indices and flatten.
-        # Keep accumulated indices across steps (real SGLang re-inserts
-        # the full kv_indices each call to cache_unfinished_req).
         flat_indices = torch.cat(
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
 
+        # Only insert when we have enough accumulated slots to cover
+        # the page-aligned key (real SGLang invariant: value len == key len).
+        # Tail stays in _allocated_indices — not freed, not truncated.
         if len(flat_indices) >= key_len:
-            # value length == key length (real SGLang contract:
-            # kv_indices[:len(radix_key)])
             values = flat_indices[:key_len].clone()
             self._cache.insert(InsertParams(key=key, value=values))
-            # Free rejected spec slots + unaligned tail
-            # (radix_cache.py: free(kv_indices[cache_protected_len:key_len])
-            #  + free(kv_indices[key_len:]))
-            if len(flat_indices) > key_len:
-                self._mock_allocator.free(flat_indices[key_len:])
-                # Keep only the inserted portion for next re-insert
-                sim_req._allocated_indices = [values]
-        else:
-            raise RuntimeError(
-                f"sync_state: flat_indices ({len(flat_indices)}) shorter "
-                f"than key ({key_len}).  Prefix indices may not have been "
-                f"tracked in _allocated_indices."
-            )
+        # else: not enough accumulated slots yet — wait for next step
+
+    def free_rejected_slots(
+        self, sim_req: "SGLangSimRequest", num_rejected: int
+    ) -> None:
+        """Free rejected spec token slots from the tail of allocated indices.
+
+        Called by the scheduler after acceptance.  vLLM handles this via
+        position rollback; in our mock pool we must explicitly free.
+        """
+        if num_rejected <= 0:
+            return
+        flat = torch.cat(
+            [t for t in sim_req._allocated_indices if len(t) > 0]
+        ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
+        if len(flat) >= num_rejected:
+            self._mock_allocator.free(flat[-num_rejected:])
+            # Remove freed indices from _allocated_indices
+            keep_len = len(flat) - num_rejected
+            if keep_len > 0:
+                sim_req._allocated_indices = [flat[:keep_len].clone()]
+            else:
+                sim_req._allocated_indices = []
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Mark request's cache entries as evictable.

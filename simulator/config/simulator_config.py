@@ -181,11 +181,20 @@ class SimulatorConfig:
             base_latency_ms=gpu_data.get("base_latency_ms"),
         )
 
+        arrival_data = data.get("arrival", {})
+        arrival = RequestArrivalConfig(
+            num_requests=arrival_data.get("num_requests", 100),
+            arrival_pattern=arrival_data.get("arrival_pattern", "poisson"),
+            poisson_rate=arrival_data.get("poisson_rate", 1.0),
+            stagger_delay_steps=arrival_data.get("stagger_delay_steps", 5),
+        )
+
         return cls(
             model_name=data.get("model_name", "deepseek-ai/DeepSeek-V4-Flash"),
             model_config_path=data.get("model_config_path"),
             backend=data.get("backend", "vllm"),
             dataset=dataset,
+            arrival=arrival,
             speculative=speculative,
             gpu_perf=gpu_perf,
             kv_cache_block_size=data.get("kv_cache_block_size", 16),

@@ -66,6 +66,11 @@ class KVBackend(ABC):
         """Sync accepted output tokens to the backend after a decode step."""
         ...
 
+    def free_rejected_slots(self, sim_req: Any, num_rejected: int) -> None:
+        """Free rejected spec token slots.  vLLM: no-op (position rollback).
+        SGLang: explicit free from mock pool."""
+        pass
+
     @abstractmethod
     def free(self, sim_req: Any) -> None:
         """Free all blocks for a request."""

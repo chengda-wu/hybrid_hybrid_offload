@@ -215,8 +215,9 @@ class SimulatorScheduler:
         # 6. Evaluate acceptance on spec tokens
         num_accepted, num_rejected = self._acceptance.evaluate(req, spec_tokens)
 
-        # 7. update_from_output: subtract rejected
+        # 7. update_from_output: subtract rejected, free rejected slots
         req.subtract_rejected_tokens(num_rejected)
+        self._backend.free_rejected_slots(req.backend_req, num_rejected)
 
         # 8. Append accepted output tokens
         accepted_tokens: list[int] = []
