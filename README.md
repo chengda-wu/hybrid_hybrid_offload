@@ -10,8 +10,9 @@
 
 ```bash
 # 安装依赖（需要 Python 3.12+）
-uv sync
-source .venv/bin/activate
+# vllm 和 sglang 需要单独安装，仓库不自带依赖管理：
+pip install -e /path/to/vllm    # vLLM editable install
+pip install -e /path/to/sglang  # SGLang editable install
 
 # 运行仿真
 python -m simulator.run --backend vllm --num-requests 20
@@ -127,7 +128,7 @@ python -m simulator.run --backend vllm \
   --num-requests 50 --prompt-length 512 --output-length 256 \
   --shared-prefix-ratio 0.5 --seed 42 -o report_vllm.json
 
-# SGLang: token 级 Radix Tree 匹配，可配置驱逐策略
+# SGLang: Radix Tree 匹配（page_size=256 页对齐），可配置驱逐策略
 python -m simulator.run --backend sglang \
   --num-requests 50 --prompt-length 512 --output-length 256 \
   --shared-prefix-ratio 0.5 --seed 42 -o report_sglang.json
@@ -252,6 +253,14 @@ EOF
 
 python -m simulator.run --config batch_experiment.json -o result.json
 ```
+
+### 已知简化
+
+- **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
+- **无抢占**：分配失败时请求留在 PRE_FILL 状态重试，不会被换出。
+- **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
+- **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
+- **SGLang 单池**：使用一个平坦 RadixCache + MockAllocator，不区分 SWA ring/C4/C128 三个物理池。prefix 匹配行为不受影响，但内存压力模型是近似的。
 
 ### 调度逻辑说明
 
