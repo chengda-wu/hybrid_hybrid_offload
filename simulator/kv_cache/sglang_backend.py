@@ -311,6 +311,10 @@ class SGLangBackend(KVBackend):
             elif info.name == "c128_compressor":
                 state_tokens = swa_slots * c128_ring
                 group_bytes = state_tokens * per_token * info.layer_count
+            elif info.name == "c4_indexer":
+                # SGLang DSV4PoolConfigurator has no separate indexer pool —
+                # indexer KV lives in c4_mla (the c4_max bucket).
+                continue
             else:
                 # Main KV: blocks * page_bytes (matches c4/c128_max_tokens)
                 group_bytes = info.layer_count * blocks * info.page_bytes
