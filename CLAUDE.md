@@ -110,6 +110,7 @@ The scheduler only speaks `KVBackend`. It never imports vllm or sglang directly.
 - **Shared model description** lives in `KVGroupInfo` (framework-agnostic dataclass in `model_config.py`): name, block_size, page_bytes (unpadded), layer_count.  Both backends consume this; neither backend's types leak into it.
 - If a conversion is needed (e.g. KVGroupInfo → KVCacheGroupSpec), it lives in the backend that needs it (`VLLMConfig._build_vllm_specs`).
 - **Don't hardcode model parameters.** DeepSeek V4 defaults come from the actual HF `config.json` (verified against `deepseek-ai/DeepSeek-V4-Flash`). Any new model should be configurable via `--model-config`.
+- **Per-token byte constants (584, 132, 2048, 1024) are DSV4-specific.** They live in `model_config.py::_build_kv_cache_groups` (framework-agnostic) and `sglang_backend.py::total_bytes` (SGLang-specific ring sizing). When adding a new model, derive these from the model architecture or the real framework's `get_bytes_per_token()`, not by copying the constants.
 - **Spec token lifecycle mirrors vLLM scheduler.** `_update_after_schedule` adds all (1+K), `update_from_output` subtracts rejected. Bonus token is always from ground truth, never counted in acceptance.
 - **No chunked prefill.** By design — documented limitation.
 - **SGLang free() is intentionally a no-op.** Real SGLang frees via `evict()` only; `dec_lock_ref` just marks evictable. Our simulation matches this.

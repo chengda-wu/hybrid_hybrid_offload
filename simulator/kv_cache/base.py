@@ -90,7 +90,12 @@ class KVBackend(ABC):
     @property
     @abstractmethod
     def total_bytes(self) -> int:
-        """Total KV cache size in bytes (actual allocation)."""
+        """Total KV cache size in bytes.
+
+        Must use the real framework's sizing logic — vLLM delegates to
+        ``_bucket_layers_by_page_size``, SGLang delegates to
+        ``DSV4PoolConfigurator`` formulas.  No hand-coded constants.
+        """
         ...
 
     @property
