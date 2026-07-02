@@ -276,26 +276,43 @@ class SGLangBackend(KVBackend):
 
     @property
     def total_bytes(self) -> int:
-        """Total KV cache bytes.
+        """Total KV cache bytes — matches real SGLang DSV4PoolConfigurator.
 
-        SWA portion uses the real SGLang pool_configurator logic:
-          swa_tokens = align(full_tokens * swa_ratio, page_size)
-        where full_tokens = blocks * scheduler_block_size (the shared
-        token budget) and swa_ratio=0.1 (deepseek_v4_hook.py:57).
+        Main KV (swa, c4_mla, c128_mla, c4_indexer):
+          scaled from full_tokens = blocks * scheduler_block_size.
+
+        Compressor state pools (c4_compressor, c128_compressor):
+          ring buffers sized from swa_tokens, NOT from blocks.
+          pool_configurator.py:586-589:
+            state_pool = swa_tokens // swa_page_size * ring_size
         """
         blocks = self._backend_config.num_kv_cache_blocks
         page_size = self._page_size
         scheduler_bs = self._backend_config.scheduler_block_size
+        swa_page_size = 64  # hardcoded in DeepseekV4SWACache
+
+        # SGLang ring sizes (deepseek_v4_memory_pool.py:30-44)
+        c4_ring = 8
+        c128_ring = 128
+
+        full_tokens = blocks * scheduler_bs
+        swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
+        swa_slots = swa_tokens // swa_page_size  # shared ring slot count
+        per_token = 584
+
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
             if info.name == "swa":
-                # pool_configurator.py:313-314,407:
-                # swa_tokens = align(int(full_tokens * ratio), page_size)
-                full_tokens = blocks * scheduler_bs
-                swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
-                per_token = info.page_bytes // info.block_size
                 group_bytes = swa_tokens * per_token * info.layer_count
+            elif info.name == "c4_compressor":
+                # ring buffer: swa_slots slots × ring_size tokens each
+                state_tokens = swa_slots * c4_ring
+                group_bytes = state_tokens * per_token * info.layer_count
+            elif info.name == "c128_compressor":
+                state_tokens = swa_slots * c128_ring
+                group_bytes = state_tokens * per_token * info.layer_count
             else:
+                # Main KV: blocks * page_bytes (matches c4/c128_max_tokens)
                 group_bytes = info.layer_count * blocks * info.page_bytes
             total += group_bytes
         return total
