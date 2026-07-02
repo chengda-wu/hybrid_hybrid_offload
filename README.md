@@ -128,7 +128,7 @@ python -m simulator.run [OPTIONS]
 
 #### vLLM — 9.60 GB
 
-vLLM 使用 **packed layout**（`_get_kv_cache_config_packed`），6 组共享单一 BlockPool 并通过 `offset`+`block_stride` 共享物理分配：
+vLLM 使用 **packed layout**（`_get_kv_cache_config_packed`），6 组共享单一 BlockPool 并通过 `offset`+`block_stride` 共享物理分配。下表为各组独立 page 容量（十进制 GB），不可加和（共享池）：
 
 | Group | 类型 | 层数 | block_size | page 字节 | 总容量 |
 |-------|------|------|------------|-----------|--------|
@@ -156,7 +156,7 @@ KV 池页面有 576 字节对齐 padding（`DeepSeekV4SingleKVPool.create_buffer
 | C128 Compressor ring | `swa_slots × ring(128) × 4096B × 20L` | 20L | 7.99 GB |
 | C4 Main KV | `blocks × pad(64×584) × 21L` | 21L | 3.00 GB |
 | C128 Main KV | `blocks × pad(2×584) × 20L` | 20L | 0.13 GB |
-| C4 Indexer | KV: `blocks × pad(64×132) × 21L` + State: `swa_slots × ring(8) × 2048B × 21L` | 21L | 0.94 GB |
+| C4 Indexer | KV: `blocks × (64×132) × 21L`（无 pad）+ State: `swa_slots × ring(8) × 2048B × 21L` | 21L | 0.94 GB |
 
 - `full_token = blocks × scheduler_block_size = 4096 × 256 = 1,048,576`
 - `swa_tokens = 104,704`（full_token × 0.1, page-aligned）；`swa_page_size = 128`（cfg.window_size）；`swa_slots = 818`
@@ -166,7 +166,7 @@ KV 池页面有 576 字节对齐 padding（`DeepSeekV4SingleKVPool.create_buffer
 - Indexer state: float32, `last_dim=512`（2048 B/token）
 - 来源：`sglang/srt/model_executor/pool_configurator.py`、`mem_cache/deepseek_v4_memory_pool.py`
 
-SGLang 比 vLLM 大约 5.98 GB，主要来自：C128 compressor state 池（float32 ring buffer vs vLLM packed pool，+5.49 GB）、SWA 满密度（−4.13 GB）、C4 compressor state（−1.77 GB），其余项相互抵消。
+SGLang 15.58 GB vs vLLM 9.60 GB，差值 +5.98 GB。主要贡献：C128 compressor state 池（SGLang float32 ring buffer vs vLLM packed pool，+5.49 GB）、SWA 满密度差异（−4.13 GB）、C4 compressor state（−1.77 GB），其余项相互抵消。vLLM 侧以 packed 共享池折算。
 
 两端差异来自框架本身的架构选择，非模拟器偏差。
 
