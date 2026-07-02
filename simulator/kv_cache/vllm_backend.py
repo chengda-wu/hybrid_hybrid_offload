@@ -187,11 +187,21 @@ class vLLMSimRequest:
     def sync_to_vllm(self) -> None:
         """Push simulator token state into the vllm Request.
 
-        Only sync prompt + accepted output tokens; spec tokens are excluded
-        since they may be rejected.
+        Calls append_output_token_ids so that accepted decode tokens
+        enter the vllm prefix cache (_all_token_ids / block_hashes /
+        num_tokens are updated).  Spec tokens are excluded — they
+        have been cleared before this call.
         """
         if self._vllm_request is None:
             return
         self._vllm_request.num_computed_tokens = (
             len(self.prompt_token_ids) + len(self.output_token_ids)
         )
+        # Append accepted output tokens so they enter the block hash chain.
+        # The scheduler has already called sync_state with the full output;
+        # we only need to append tokens that haven't been appended yet.
+        vllm_req = self._vllm_request
+        already_appended = vllm_req.num_output_tokens
+        new_tokens = self.output_token_ids[already_appended:]
+        if new_tokens:
+            vllm_req.append_output_token_ids(list(new_tokens))
