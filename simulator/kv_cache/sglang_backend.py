@@ -207,7 +207,14 @@ class SGLangBackend(KVBackend):
             f"_allocated_indices out of sync with output"
         )
         values = flat_indices[:key_len].clone()
-        self._cache.insert(InsertParams(key=key, value=values))
+        result = self._cache.insert(InsertParams(key=key, value=values))
+        # Lock the new prefix so evict() won't free it while the request
+        # is active (matches real SGLang cache_unfinished_req, radix_cache.py:536-537).
+        if sim_req._last_node is not None:
+            self._cache.dec_lock_ref(sim_req._last_node)
+        if result.last_device_node is not None:
+            self._cache.inc_lock_ref(result.last_device_node)
+            sim_req._last_node = result.last_device_node
 
     def free_rejected_slots(
         self, sim_req: "SGLangSimRequest", num_rejected: int
@@ -235,15 +242,23 @@ class SGLangBackend(KVBackend):
                 sim_req._allocated_indices = []
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
-        """Free unaligned tail indices (radix_cache.py:478-479).
+        """Free unaligned tail indices and release lock_ref.
 
         Page-aligned indices are freed lazily by evict() — tail indices
         are NOT in the tree, so they must be freed explicitly here.
+        Lock is released so evict() can reclaim the request's tree nodes
+        (matches real SGLang cache_finished_req, radix_cache.py:483).
         """
         import torch
         from array import array
         from sglang.srt.mem_cache.radix_cache import RadixKey
 
+        # Release lock on prefix node
+        if sim_req._last_node is not None:
+            self._cache.dec_lock_ref(sim_req._last_node)
+            sim_req._last_node = None
+
+        # Free unaligned tail
         all_tokens = array(
             "q", sim_req.prompt_token_ids + sim_req.output_token_ids
         )
@@ -350,6 +365,7 @@ class SGLangSimRequest:
         "output_token_ids",
         "spec_token_ids",
         "_allocated_indices",
+        "_last_node",
     )
 
     def __init__(
@@ -360,7 +376,8 @@ class SGLangSimRequest:
         self.max_tokens = max_tokens
         self.output_token_ids: list[int] = []
         self.spec_token_ids: list[int] = []
-        self._allocated_indices: list[Any] = []  # track all allocs for free()
+        self._allocated_indices: list[Any] = []
+        self._last_node: Any = None
 
     @property
     def num_tokens(self) -> int:
