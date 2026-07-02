@@ -278,43 +278,48 @@ class SGLangBackend(KVBackend):
     def total_bytes(self) -> int:
         """Total KV cache bytes — matches real SGLang DSV4PoolConfigurator.
 
-        Main KV (swa, c4_mla, c128_mla, c4_indexer):
-          scaled from full_tokens = blocks * scheduler_block_size.
-
-        Compressor state pools (c4_compressor, c128_compressor):
-          ring buffers sized from swa_tokens, NOT from blocks.
-          pool_configurator.py:586-589:
-            state_pool = swa_tokens // swa_page_size * ring_size
+        Uses real SGLang DSV4PoolConfigurator formulas:
+          swa_tokens  = align(full_tokens * 0.1, page_size)
+          swa_slots   = swa_tokens // window_size(128)
+          c4/c128 KV  = full_tokens // compress_ratio
+          c4/c128 state = swa_slots * ring_size * state_bytes_per_token
+          indexer KV  = c4 KV sized, 132 B/token
+          indexer state = swa_slots * ring * state_bytes_per_token(2048)
         """
         blocks = self._backend_config.num_kv_cache_blocks
         page_size = self._page_size
         scheduler_bs = self._backend_config.scheduler_block_size
-        swa_page_size = 64  # hardcoded in DeepseekV4SWACache
+        swa_page_size = 128  # cfg.window_size (configs/deepseek_v4.py:102)
 
-        # SGLang ring sizes (deepseek_v4_memory_pool.py:30-44)
+        # Ring sizes (deepseek_v4_memory_pool.py:30-44)
         c4_ring = 8
         c128_ring = 128
 
+        # Per-token byte costs
+        kv_bytes = 584  # fp8_ds_mla KV
+        c4_state_bytes = 8192   # float32, state_dim=2048 (2*2*512*4)
+        c128_state_bytes = 4096 # float32, state_dim=1024 (2*1*512*4)
+        idx_state_bytes = 2048  # float32, indexer last_dim=512 (2*2*128*4)
+
         full_tokens = blocks * scheduler_bs
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
-        swa_slots = swa_tokens // swa_page_size  # shared ring slot count
-        per_token = 584
+        swa_slots = swa_tokens // swa_page_size
 
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
             if info.name == "swa":
-                group_bytes = swa_tokens * per_token * info.layer_count
+                group_bytes = swa_tokens * kv_bytes * info.layer_count
             elif info.name == "c4_compressor":
-                # ring buffer: swa_slots slots × ring_size tokens each
                 state_tokens = swa_slots * c4_ring
-                group_bytes = state_tokens * per_token * info.layer_count
+                group_bytes = state_tokens * c4_state_bytes * info.layer_count
             elif info.name == "c128_compressor":
                 state_tokens = swa_slots * c128_ring
-                group_bytes = state_tokens * per_token * info.layer_count
+                group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
-                # SGLang DSV4PoolConfigurator has no separate indexer pool —
-                # indexer KV lives in c4_mla (the c4_max bucket).
-                continue
+                # Indexer KV (in c4_mla bucket) + indexer compress state
+                kv = info.layer_count * blocks * info.page_bytes
+                state = (swa_slots * c4_ring) * idx_state_bytes * info.layer_count
+                group_bytes = kv + state
             else:
                 # Main KV: blocks * page_bytes (matches c4/c128_max_tokens)
                 group_bytes = info.layer_count * blocks * info.page_bytes
