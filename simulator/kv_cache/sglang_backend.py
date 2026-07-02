@@ -336,7 +336,9 @@ class SGLangBackend(KVBackend):
                 state_tokens = swa_slots * c128_ring
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
-                kv = info.layer_count * blocks * _pad576(info.page_bytes)
+                # Indexer KV: DeepSeekV4IndexerPool._create_buffer does NOT
+                # apply 576 padding (unlike DeepSeekV4SingleKVPool).
+                kv = info.layer_count * blocks * info.page_bytes
                 state = (swa_slots * c4_ring) * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
