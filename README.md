@@ -164,14 +164,7 @@ SGLang 使用 **DSV4PoolConfigurator**（`pool_configurator.py:449`），ring bu
 - Indexer state: float32, `last_dim=512`（2048 B/token）
 - 来源：`sglang/srt/model_executor/pool_configurator.py`、`mem_cache/deepseek_v4_memory_pool.py`
 
-#### 差异说明（vLLM 9.60 vs SGLang 15.51 GB）
-
-| 来源 | 差值 |
-|------|------|
-| vLLM 576B 对齐 padding | +0.47 GB |
-| SGLang Compressor state float32 池（C4 8192B/token, C128 4096B/token）远大于 vLLM | -6.26 GB (C4: 1.05-2.82, C128: 7.99-2.50) |
-| vLLM 独立 C4 Indexer pool | +0.74 GB |
-| SGLang SWA ring 10% 密度 vs vLLM 满密度 | +4.14 GB vLLM |
+SGLang 比 vLLM 大约 5.96 GB，主要来自：C128 compressor state 池（float32 ring buffer vs vLLM packed pool，+5.51 GB）、SWA 满密度（−4.14 GB）、C4 compressor state（−1.77 GB），其余项相互抵消。
 
 两端差异来自框架本身的架构选择，非模拟器偏差。
 

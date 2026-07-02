@@ -289,7 +289,7 @@ class SGLangBackend(KVBackend):
         blocks = self._backend_config.num_kv_cache_blocks
         page_size = self._page_size
         scheduler_bs = self._backend_config.scheduler_block_size
-        swa_page_size = 128  # cfg.window_size (configs/deepseek_v4.py:102)
+        swa_page_size = 128  # cfg.window_size; pool_configurator.py:470, HF sliding_window=128
 
         # Ring sizes (deepseek_v4_memory_pool.py:30-44)
         c4_ring = 8
@@ -305,10 +305,15 @@ class SGLangBackend(KVBackend):
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size
 
+        def _pad576(raw: int) -> int:
+            return -(-raw // 576) * 576  # ceil_div, matches SGLang create_buffer
+
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
             if info.name == "swa":
-                group_bytes = swa_tokens * kv_bytes * info.layer_count
+                # SWA: pad per-page (swa_page_size * kv_bytes), then × slots × layers
+                padded_page = _pad576(swa_page_size * kv_bytes)
+                group_bytes = swa_slots * padded_page * info.layer_count
             elif info.name == "c4_compressor":
                 state_tokens = swa_slots * c4_ring
                 group_bytes = state_tokens * c4_state_bytes * info.layer_count
@@ -316,13 +321,12 @@ class SGLangBackend(KVBackend):
                 state_tokens = swa_slots * c128_ring
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
-                # Indexer KV (in c4_mla bucket) + indexer compress state
-                kv = info.layer_count * blocks * info.page_bytes
+                kv = info.layer_count * blocks * _pad576(info.page_bytes)
                 state = (swa_slots * c4_ring) * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
-                # Main KV: blocks * page_bytes (matches c4/c128_max_tokens)
-                group_bytes = info.layer_count * blocks * info.page_bytes
+                # Main KV: pad per-page, blocks pages per layer
+                group_bytes = info.layer_count * blocks * _pad576(info.page_bytes)
             total += group_bytes
         return total
 
