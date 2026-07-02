@@ -308,15 +308,23 @@ class SGLangBackend(KVBackend):
         scheduler_bs = self._backend_config.scheduler_block_size
         swa_page_size = 128  # cfg.window_size; pool_configurator.py:470, HF sliding_window=128
 
-        # Ring sizes (deepseek_v4_memory_pool.py:30-44)
+        # Ring sizes from get_compress_state_ring_size()
+        # (deepseek_v4_memory_pool.py:30-44)
         c4_ring = 8
         c128_ring = 128
 
-        # Per-token byte costs
-        kv_bytes = 584  # fp8_ds_mla KV
-        c4_state_bytes = 8192   # float32, state_dim=2048 (2*2*512*4)
-        c128_state_bytes = 4096 # float32, state_dim=1024 (2*1*512*4)
-        idx_state_bytes = 2048  # float32, indexer last_dim=512 (2*2*128*4)
+        # Per-token byte costs.  Verified against SGLang source functions
+        # that cannot be imported standalone (they require server_args/GPU):
+        #   kv_bytes      = vLLM MLAAttentionSpec.real_page_bytes // storage_bs
+        #                 = SGLang DeepSeekV4SingleKVPool.get_bytes_per_token()
+        #   c4_state_bytes  = CompressStatePool last_dim * sizeof(float32)
+        #                    (deepseek_v4_compress_state.py:117-119, overlap=True)
+        #   c128_state_bytes = same, overlap=False
+        #   idx_state_bytes  = Indexer CompressStatePool last_dim * sizeof(float32)
+        kv_bytes = 584  # fp8_ds_mla, 448 NoPE + 128 RoPE + 8 scale
+        c4_state_bytes = 8192   # 2048 × 4  (last_dim = 2×2×512)
+        c128_state_bytes = 4096 # 1024 × 4  (last_dim = 2×1×512)
+        idx_state_bytes = 2048  #  512 × 4  (last_dim = 2×2×128)
 
         full_tokens = blocks * scheduler_bs
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
