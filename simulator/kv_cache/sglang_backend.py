@@ -200,21 +200,25 @@ class SGLangBackend(KVBackend):
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
 
-        # Only insert when we have enough accumulated slots to cover
-        # the page-aligned key (real SGLang invariant: value len == key len).
-        # Tail stays in _allocated_indices — not freed, not truncated.
-        if len(flat_indices) >= key_len:
-            values = flat_indices[:key_len].clone()
-            self._cache.insert(InsertParams(key=key, value=values))
-        # else: not enough accumulated slots yet — wait for next step
+        # flat >= key_len always holds: flat == total_tokens and
+        # key_len = floor(total_tokens/page_size)*page_size <= total_tokens.
+        assert len(flat_indices) >= key_len, (
+            f"flat({len(flat_indices)}) < key_len({key_len}); "
+            f"_allocated_indices out of sync with output"
+        )
+        values = flat_indices[:key_len].clone()
+        self._cache.insert(InsertParams(key=key, value=values))
 
     def free_rejected_slots(
         self, sim_req: "SGLangSimRequest", num_rejected: int
     ) -> None:
         """Free rejected spec token slots from the tail of allocated indices.
 
-        Called by the scheduler after acceptance.  vLLM handles this via
-        position rollback; in our mock pool we must explicitly free.
+        Requires: rejected draft slots are the LAST num_rejected entries
+        in _allocated_indices.  This holds because each decode step calls
+        allocate_slots exactly once with 1+K tokens appended at the tail.
+        If future code adds multiple allocs per step, this must be changed
+        to track per-step segment bounds.
         """
         if num_rejected <= 0:
             return
@@ -231,16 +235,27 @@ class SGLangBackend(KVBackend):
                 sim_req._allocated_indices = []
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
-        """Mark request's cache entries as evictable.
+        """Free unaligned tail indices (radix_cache.py:478-479).
 
-        Does NOT directly free KV indices.  Like real SGLang, only evict()
-        calls allocator.free().  This avoids double-free when evict() and
-        free() both try to release the same tree node's value.
+        Page-aligned indices are freed lazily by evict() — tail indices
+        are NOT in the tree, so they must be freed explicitly here.
         """
-        # Real SGLang: dec_lock_ref on last_node.  Our simulation doesn't
-        # track lock_ref (all nodes are lock_ref=0), so free() is a no-op.
-        # Indices are freed lazily by evict() under memory pressure.
-        pass
+        import torch
+        from array import array
+        from sglang.srt.mem_cache.radix_cache import RadixKey
+
+        all_tokens = array(
+            "q", sim_req.prompt_token_ids + sim_req.output_token_ids
+        )
+        key_len = len(RadixKey(token_ids=all_tokens).page_aligned(self._page_size))
+
+        flat = torch.cat(
+            [t for t in sim_req._allocated_indices if len(t) > 0]
+        ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
+
+        if len(flat) > key_len:
+            self._mock_allocator.free(flat[key_len:])
+        sim_req._allocated_indices = []
 
     def reset(self) -> None:
         self._cache.reset()
