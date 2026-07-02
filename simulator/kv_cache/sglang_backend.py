@@ -227,6 +227,8 @@ class SGLangBackend(KVBackend):
         If future code adds multiple allocs per step, this must be changed
         to track per-step segment bounds.
         """
+        import torch
+
         if num_rejected <= 0:
             return
         flat = torch.cat(
