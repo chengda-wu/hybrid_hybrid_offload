@@ -122,6 +122,58 @@ python -m simulator.run [OPTIONS]
 }
 ```
 
+### DeepSeek V4 Flash KV Cache 布局（4096 blocks）
+
+仿真器分别为 vLLM 和 SGLang 建模了各自的真实 KV 管理方式。
+
+#### vLLM — 9.60 GB
+
+vLLM 使用 **packed layout**（`_get_kv_cache_config_packed`），6 组共享单一 BlockPool 并通过 `offset`+`block_stride` 共享物理分配：
+
+| Group | 类型 | 层数 | block_size | page 字节 | 总容量 |
+|-------|------|------|------------|-----------|--------|
+| SWA | SlidingWindowMLASpec | 43L | 64 | 37,440 B | 6.59 GB |
+| C4 Compressor | SlidingWindowMLASpec | 21L | 4 | 32,832 B | 2.82 GB |
+| C128 Compressor | SlidingWindowMLASpec | 20L | 8 | 32,832 B | 2.69 GB |
+| C4 Main MLA | MLAAttentionSpec | 21L | 256 (cr=4) | 37,440 B | 3.22 GB |
+| C128 Main MLA | MLAAttentionSpec | 20L | 256 (cr=128) | 1,728 B | 0.14 GB |
+| C4 Indexer | MLAAttentionSpec | 21L | 256 (alignment=576) | 8,640 B | 0.74 GB |
+
+- 所有 43 层都有 SWA cache（`DeepseekV4SWACache`，attention.py:290 无条件创建）
+- Compressor state 用 float32 + state_dim（C4=2048, C128=1024）
+- Page 字节已含 vLLM 的 576 字节对齐 padding
+- 来源：`vllm/models/deepseek_v4/attention.py`、`compressor.py`、`v1/core/kv_cache_utils.py`
+
+#### SGLang — 7.96 GB
+
+SGLang 使用 **DSV4PoolConfigurator**（`pool_configurator.py:449`），ring buffer + 共享 token budget：
+
+| 池 | 公式 | 层数 | 总容量 |
+|----|------|------|--------|
+| SWA ring | `swa_tokens × 584B × 43L` | 43L | 2.45 GB |
+| C4 Compressor ring | `swa_slots × ring(8) × 584B × 21L` | 21L | 0.15 GB |
+| C128 Compressor ring | `swa_slots × ring(128) × 584B × 20L` | 20L | 2.28 GB |
+| C4 Main KV | `full_token // 4 × 584B × 21L` | 21L | 2.99 GB |
+| C128 Main KV | `full_token // 128 × 584B × 20L` | 20L | 0.09 GB |
+| C4 Indexer | —（DSV4PoolConfigurator 无独立 indexer pool） | — | 0 |
+
+- `full_token = blocks × scheduler_block_size = 4096 × 256 = 1,048,576`
+- `swa_tokens = 104,704`（full_token × 0.1, page-aligned）；`swa_slots = 1,636`
+- SWA ring 密度 10%（`deepseek_v4_hook.py:57`：`swa_full_tokens_ratio=0.1`）
+- Compressor state pool 是 ring buffer 非 full page pool（C4: 8-entry, C128: 128-entry）
+- 来源：`sglang/srt/model_executor/pool_configurator.py`、`mem_cache/deepseek_v4_memory_pool.py`
+
+#### 差异说明（vLLM 9.60 vs SGLang 7.96 GB）
+
+| 来源 | 差值 |
+|------|------|
+| vLLM 576B 对齐 padding | +0.47 GB |
+| vLLM Compressor 用 full page pool vs SGLM ring buffer | +2.67 GB (C4) / +0.22 GB (C128) |
+| vLLM 独立 C4 Indexer pool | +0.74 GB |
+| SGLang SWA ring 10% 密度 vs vLLM 满密度 | -4.14 GB |
+
+两端差异来自框架本身的架构选择，非模拟器偏差。
+
 ### 使用示例
 
 **示例 1：基础对比 — vLLM vs SGLang，相同配置**
