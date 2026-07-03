@@ -91,10 +91,8 @@ class SimulatorScheduler:
             step_latency = self._gpu_perf.predict(total_loaded, total_computed)
         self._sim_time += step_latency
 
-        # 4. Record per-step metrics (skip warmup).
-        # Warmup cache is NOT reset — it reflects real system behavior
-        # (the cache IS populated during warmup, benefiting later requests).
-        if self._step > self._warmup:
+        # 4. Record per-step metrics (only after warmup cache has been cleared).
+        if self._step > self._warmup and self._warmup_reset_done:
             active_count = sum(1 for r in self._running.values() if not r.is_finished)
             self._recorder.record_step(
                 step=self._step,
@@ -286,7 +284,7 @@ class SimulatorScheduler:
         for req_id, req in list(self._running.items()):
             if req.is_finished:
                 self._backend.free(req.backend_req)
-                if self._step > self._warmup:
+                if self._step > self._warmup and self._warmup_reset_done:
                     self._recorder.record_request_done(req, self._sim_time)
                 del self._running[req_id]
                 if self._verbose:

@@ -68,6 +68,11 @@ class MockTokenToKVPoolAllocator:
     def total_tokens(self) -> int:
         return self._total
 
+    def reset(self) -> None:
+        """Clear pool state — reuses same object so RadixCache ref stays valid."""
+        self._next_idx = self._offset
+        self._free_list.clear()
+
     def available_size(self) -> int:
         return self._total - self._next_idx + len(self._free_list)
 
@@ -339,11 +344,7 @@ class SGLangBackend(KVBackend):
     def reset(self) -> None:
         self._cache.reset()
         self._pool_used = [0, 0, 0]
-        total_slots = sum(self._pool_caps)
-        self._mock_allocator = MockTokenToKVPoolAllocator(
-            total_slots,
-            on_free=lambda n: self._deduct_pool_used(n),
-        )
+        self._mock_allocator.reset()  # reuse same object, RadixCache holds ref
 
     @property
     def usage(self) -> float:

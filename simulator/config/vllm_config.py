@@ -79,11 +79,12 @@ class VLLMConfig:
                         alignment=576, model_version=bc.model_version,
                     )))
             elif name == "c4_indexer":
+                idx_hd = 68 if arch.use_fp4_indexer else 132
                 groups.append(KVCacheGroupSpec(
                     [f"model.layers.{i}.self_attn.k_cache" for i in range(nlayers)],
                     MLAAttentionSpec(
                         block_size=bs, num_kv_heads=1,
-                        head_size=132, dtype=_torch.uint8,
+                        head_size=idx_hd, dtype=_torch.uint8,
                         compress_ratio=4, cache_dtype_str=None,
                         alignment=576,
                     )))
