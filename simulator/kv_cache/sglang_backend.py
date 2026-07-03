@@ -15,16 +15,37 @@ from simulator.kv_cache.base import KVBackend
 # ---------------------------------------------------------------------------
 
 
+class ThreePoolTracker:
+    """Per-pool capacity tracker.  RadixCache uses a single index namespace
+    (one index per token).  This tracker deducts from per-pool budgets and
+    triggers eviction when any pool runs out.
+    """
+
+    def __init__(self, num_swa_layers: int, num_c4_layers: int,
+                 num_c128_layers: int):
+        # Per-token slot multipliers (one KV slot per layer per token)
+        self.swa_per_tok = num_swa_layers    # 43
+        self.c4_per_tok = num_c4_layers * 2  # main + indexer = 42
+        self.c128_per_tok = num_c128_layers  # 20
+
+    def full_slots(self, num_tokens: int) -> tuple[int, int, int]:
+        return (num_tokens * self.swa_per_tok,
+                num_tokens * self.c4_per_tok,
+                num_tokens * self.c128_per_tok)
+
+
 class MockTokenToKVPoolAllocator:
     """Minimal mock allocator for standalone RadixCache usage.
 
     Allocates integer token indices from a flat pool.  Supports free()
-    for correct cache eviction behavior.
+    for correct cache eviction behavior.  Optional offset for multi-pool
+    setups to avoid index namespace collisions.
     """
 
-    def __init__(self, total_tokens: int):
+    def __init__(self, total_tokens: int, offset: int = 0):
         self._total = total_tokens
-        self._next_idx = 0
+        self._offset = offset
+        self._next_idx = offset
         self._free_list: list[int] = []
 
     def allocate(self, num_tokens: int):
@@ -43,7 +64,7 @@ class MockTokenToKVPoolAllocator:
             return torch.tensor(indices, dtype=torch.int64)
         start = self._next_idx
         self._next_idx += num_tokens
-        if self._next_idx > self._total:
+        if self._next_idx > self._offset + self._total:
             self._next_idx = start  # rollback — matches real alloc behavior
             return None
         return torch.arange(start, start + num_tokens, dtype=torch.int64)
@@ -85,11 +106,22 @@ class SGLangBackend(KVBackend):
         self._backend_config = backend_config
         self._page_size = sglang_cfg.page_size
 
-        # Single flat token pool for simulation.  The real SGLang uses three
-        # separate pools (SWA ring buffer, C4 pages, C128 pages) but RadixCache
-        # prefix matching is content-addressed and independent of pool layout.
-        # The total token count accounts for the combined space.
-        self._mock_allocator = MockTokenToKVPoolAllocator(sglang_cfg.total_tokens)
+        # Single RadixCache allocator (one index per token).
+        total_slots = sglang_cfg.swa_tokens + sglang_cfg.c4_tokens + sglang_cfg.c128_tokens
+        self._mock_allocator = MockTokenToKVPoolAllocator(total_slots)
+
+        # Three-pool capacities in per-layer slot equivalents.
+        # Each token consumes swa_layers + c4_layers*2 + c128_layers slots.
+        self._pool_caps = [
+            sglang_cfg.swa_tokens,
+            sglang_cfg.c4_tokens,
+            sglang_cfg.c128_tokens,
+        ]
+        self._pool_used = [0, 0, 0]  # [swa, c4, c128] slots used
+        arch = backend_config.model_arch
+        self._swa_per_tok = arch.num_layers
+        self._c4_per_tok = (sum(1 for cr in (arch.compress_ratios or []) if cr == 4) * 2)
+        self._c128_per_tok = sum(1 for cr in (arch.compress_ratios or []) if cr == 128)
 
         from sglang.srt.mem_cache.radix_cache import RadixCache
 
@@ -157,14 +189,37 @@ class SGLangBackend(KVBackend):
         if to_alloc <= 0:
             return torch.tensor([], dtype=torch.int64)
 
+        # Three-pool capacity check: each token consumes per-layer slots.
+        swa_need = to_alloc * self._swa_per_tok
+        c4_need = to_alloc * self._c4_per_tok
+        c128_need = to_alloc * self._c128_per_tok
+
+        # If any pool is over budget, trigger RadixCache eviction
+        if (self._pool_used[0] + swa_need > self._pool_caps[0] or
+                self._pool_used[1] + c4_need > self._pool_caps[1] or
+                self._pool_used[2] + c128_need > self._pool_caps[2]):
+            self._cache.evict(EvictParams(
+                num_tokens=max(swa_need, c4_need, c128_need)))
+            # Re-check: eviction may have freed enough
+            if (self._pool_used[0] + swa_need > self._pool_caps[0] or
+                    self._pool_used[1] + c4_need > self._pool_caps[1] or
+                    self._pool_used[2] + c128_need > self._pool_caps[2]):
+                return None
+
+        # RadixCache token-level allocation (one index per token)
         if self._mock_allocator.available_size() < to_alloc:
             deficit = to_alloc - self._mock_allocator.available_size()
             self._cache.evict(EvictParams(num_tokens=deficit))
 
-        if self._mock_allocator.available_size() < to_alloc:
+        new_indices = self._mock_allocator.allocate(to_alloc)
+        if new_indices is None:
             return None
 
-        new_indices = self._mock_allocator.allocate(to_alloc)
+        # Track per-pool slot usage
+        self._pool_used[0] += swa_need
+        self._pool_used[1] += c4_need
+        self._pool_used[2] += c128_need
+
         sim_req._allocated_indices.append(new_indices)
         return new_indices
 
@@ -280,17 +335,19 @@ class SGLangBackend(KVBackend):
 
     @property
     def usage(self) -> float:
-        total = self._mock_allocator._total
-        num_free = self._mock_allocator.available_size()
-        return (total - num_free) / total if total > 0 else 0.0
+        # Average of three-pool utilization
+        ratios = []
+        for used, cap in zip(self._pool_used, self._pool_caps):
+            ratios.append(used / cap if cap > 0 else 0.0)
+        return sum(ratios) / len(ratios) if ratios else 0.0
 
     @property
     def num_free_blocks(self) -> int:
-        return self._mock_allocator.available_size()  # token slots, not blocks
+        return self._mock_allocator.available_size()
 
     @property
     def total_blocks(self) -> int:
-        return self._mock_allocator._total  # token slots, not blocks
+        return self._mock_allocator.total_tokens
 
     @property
     def total_bytes(self) -> int:
