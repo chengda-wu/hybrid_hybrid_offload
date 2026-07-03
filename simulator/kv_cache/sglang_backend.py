@@ -23,11 +23,13 @@ class MockTokenToKVPoolAllocator:
     setups to avoid index namespace collisions.
     """
 
-    def __init__(self, total_tokens: int, offset: int = 0):
+    def __init__(self, total_tokens: int, offset: int = 0,
+                 on_free: "callable | None" = None):
         self._total = total_tokens
         self._offset = offset
         self._next_idx = offset
         self._free_list: list[int] = []
+        self._on_free = on_free
 
     def allocate(self, num_tokens: int):
         """Allocate *num_tokens* token indices, reusing freed ones first.
@@ -53,9 +55,14 @@ class MockTokenToKVPoolAllocator:
     def free(self, indices) -> None:
         """Return token indices to the free pool."""
         if hasattr(indices, "tolist"):
-            self._free_list.extend(indices.tolist())
+            vals = indices.tolist()
         elif isinstance(indices, list):
-            self._free_list.extend(indices)
+            vals = list(indices)
+        else:
+            return
+        self._free_list.extend(vals)
+        if self._on_free is not None:
+            self._on_free(len(vals))
 
     @property
     def total_tokens(self) -> int:
@@ -95,7 +102,10 @@ class SGLangBackend(KVBackend):
 
         # Single RadixCache allocator (one index per token).
         total_slots = sglang_cfg.swa_tokens + sglang_cfg.c4_tokens + sglang_cfg.c128_tokens
-        self._mock_allocator = MockTokenToKVPoolAllocator(total_slots)
+        self._mock_allocator = MockTokenToKVPoolAllocator(
+            total_slots,
+            on_free=lambda n: self._deduct_pool_used(n),
+        )
 
         # Three-pool capacities in per-layer slot equivalents.
         # Each token consumes swa_layers + c4_layers*2 + c128_layers slots.
@@ -193,11 +203,9 @@ class SGLangBackend(KVBackend):
                     self._pool_used[2] + c128_need > self._pool_caps[2]):
                 return None
 
-        # RadixCache token-level allocation (one index per token)
-        if self._mock_allocator.available_size() < to_alloc:
-            deficit = to_alloc - self._mock_allocator.available_size()
-            self._cache.evict(EvictParams(num_tokens=deficit))
-
+        # RadixCache token-level allocation (one index per token).
+        # Flat pool check is redundant with per-pool cap check above;
+        # the flat pool has ample capacity (15.6M slots).
         new_indices = self._mock_allocator.allocate(to_alloc)
         if new_indices is None:
             return None
@@ -412,12 +420,17 @@ class SGLangBackend(KVBackend):
             elif info.name == "c4_indexer":
                 # Indexer KV: DeepSeekV4IndexerPool._create_buffer does NOT
                 # apply 576 padding (unlike DeepSeekV4SingleKVPool).
-                kv = info.layer_count * blocks * info.page_bytes
-                state = (swa_slots * c4_ring) * idx_state_bytes * info.layer_count
+                # pages = full_tokens // page_size (not blocks, which may differ)
+                kv_pages = full_tokens // page_size
+                kv = info.layer_count * kv_pages * info.page_bytes
+                # Indexer state: same size+ring+1 rounding as compressor state
+                raw = swa_slots * c4_ring
+                state_tok = -(-(raw + c4_ring + 1) // c4_ring) * c4_ring
+                state = state_tok * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
-                # Main KV: pad per-page, blocks pages per layer
-                group_bytes = info.layer_count * blocks * _pad576(info.page_bytes)
+                # Main KV: pad per-page, full_tokens//page_size pages per layer
+                group_bytes = info.layer_count * (full_tokens // page_size) * _pad576(info.page_bytes)
             total += group_bytes
         return total
 

@@ -216,7 +216,6 @@ class KVBackendConfig:
     max_model_len: int = 8192
     num_kv_cache_blocks: int = 4096
     scheduler_block_size: int = 16
-    page_size: int = 1  # SGLang: tokens per page (1 = token-level)
     kv_cache_dtype: str = "auto"
     model_version: str = "deepseek_v4"
 
