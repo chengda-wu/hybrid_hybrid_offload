@@ -137,4 +137,5 @@ class SimulationEngine:
         else:
             from simulator.kv_cache.sglang_backend import SGLangBackend
 
-            return SGLangBackend(self._backend_config)
+            return SGLangBackend(self._backend_config,
+                                 num_spec_tokens=self._config.speculative.num_spec_tokens)

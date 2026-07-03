@@ -92,9 +92,10 @@ class KVBackend(ABC):
     def total_bytes(self) -> int:
         """Total KV cache size in bytes.
 
-        Must use the real framework's sizing logic — vLLM delegates to
-        ``_bucket_layers_by_page_size``, SGLang delegates to
-        ``DSV4PoolConfigurator`` formulas.  No hand-coded constants.
+        vLLM delegates to ``_bucket_layers_by_page_size``.
+        SGLang imports ``get_compress_state_ring_size`` and
+        ``_get_dsv4_compress_state_dtype_sizes`` from SGLang source;
+        remaining per-token formulas match ``pool_configurator.py``.
         """
         ...
 

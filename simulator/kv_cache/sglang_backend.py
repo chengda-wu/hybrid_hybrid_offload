@@ -100,10 +100,12 @@ class MockTokenToKVPoolAllocator:
 class SGLangBackend(KVBackend):
     """Wraps the real SGLang RadixCache for token-level simulation."""
 
-    def __init__(self, backend_config: KVBackendConfig):
+    def __init__(self, backend_config: KVBackendConfig,
+                 num_spec_tokens: int = 0):
         sglang_cfg = SGLangConfig.from_backend_config(backend_config)
 
         self._backend_config = backend_config
+        self._num_spec_tokens = num_spec_tokens
         self._page_size = sglang_cfg.page_size
 
         # Single RadixCache allocator (one index per token).
@@ -366,22 +368,27 @@ class SGLangBackend(KVBackend):
         scheduler_bs = self._backend_config.scheduler_block_size
         swa_page_size = 128  # cfg.window_size; pool_configurator.py:470, HF sliding_window=128
 
-        # Ring sizes — import from SGLang (module-level, no server_args needed)
+        # Ring sizes — import from SGLang (module-level, no server_args needed).
+        # Spec mode doubles ring sizes (pool_configurator.py:514).
+        is_spec = getattr(backend_config, "num_spec_tokens", 0) > 0
         from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
             get_compress_state_ring_size,
         )
-        c4_ring = get_compress_state_ring_size(4)
-        c128_ring = get_compress_state_ring_size(128)
+        c4_ring = get_compress_state_ring_size(4, is_speculative=is_spec)
+        c128_ring = get_compress_state_ring_size(128, is_speculative=is_spec)
 
-        # Per-token byte costs derived from model arch (pool_configurator.py:578-594).
+        # Per-token byte costs from SGLang (pool_configurator.py:578-594).
         # kv_bytes = qk_nope + qk_rope*2 + 8 (fp8_ds_mla UE8M0 layout)
         kv_bytes = 584
-        # compressor state: last_dim = 2*(1+overlap)*head_dim; * sizeof(float32)
-        # (deepseek_v4_compress_state.py:117-119)
-        c4_state_bytes = 2 * 2 * 512 * 4   # overlap=True,  head_dim=512 → 8192
-        c128_state_bytes = 2 * 1 * 512 * 4 # overlap=False, head_dim=512 → 4096
-        # indexer state: last_dim = 2*2*index_head_dim; * sizeof(float32)
-        idx_state_bytes = 2 * 2 * 128 * 4  # index_head_dim=128 → 2048
+        # dtype sizes from _get_dsv4_compress_state_dtype_sizes()
+        # (pool_configurator.py:74-88, default float32→4)
+        from sglang.srt.model_executor.pool_configurator import (
+            _get_dsv4_compress_state_dtype_sizes,
+        )
+        c4_dt, c128_dt = _get_dsv4_compress_state_dtype_sizes()
+        c4_state_bytes = 2 * 2 * 512 * c4_dt    # last_dim=2048, overlap=True
+        c128_state_bytes = 2 * 1 * 512 * c128_dt # last_dim=1024, overlap=False
+        idx_state_bytes = 2 * 2 * 128 * c4_dt    # indexer uses c4 dtype
 
         full_tokens = blocks * scheduler_bs
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
