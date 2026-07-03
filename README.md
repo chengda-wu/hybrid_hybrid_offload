@@ -314,7 +314,7 @@ python -m simulator.run --config batch_experiment.json -o result.json
 - **无抢占**：分配失败时请求留在 PRE_FILL 状态重试，不会被换出。
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
-- **SGLang 单池**：使用一个平坦 RadixCache + MockAllocator，不区分 SWA ring/C4/C128 三个物理池。prefix 匹配行为不受影响，但内存压力模型是近似的。
+- **SGLang 单池 vs 三物理池**：仿真使用一个平坦 MockAllocator（1M token slots），不区分 SWA ring/C4/C128 三个独立物理池。prefix 匹配不受影响，但内存压力模型是近似的——真实 SGLang 各池独立触发 OOM（如 C128 仅 8192 token 即满），sim 单池把三池容量混在一起，C128 用尽时可从 SWA/C4 配额"借"，cache_usage 和驱逐时机会偏离真实。常规负载（<10% 利用率）下影响可忽略，高压场景需注意。
 
 ### 调度逻辑说明
 

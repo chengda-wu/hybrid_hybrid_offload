@@ -125,17 +125,13 @@ class VLLMConfig:
         bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
         available_memory = bc.num_kv_cache_blocks * bytes_per_block
 
-        # Build the KVCacheConfig.  _get_kv_cache_config_packed needs a
-        # VllmConfig for may_override_num_blocks; we pass a minimal namespace
-        # whose cache_config.num_gpu_blocks_override forces our block count.
-        from types import SimpleNamespace
-        vllm_ns = SimpleNamespace(
-            cache_config=SimpleNamespace(
-                num_gpu_blocks_override=bc.num_kv_cache_blocks,
-            ),
-        )
+        # Build the KVCacheConfig.  We control num_blocks and tensor layout
+        # is handled by _get_kv_cache_config_packed — no need for a real
+        # VllmConfig or SimpleNamespace workaround.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
-            vllm_ns, kv_cache_groups, available_memory
+            _vllm_config_ns(bc.num_kv_cache_blocks),
+            kv_cache_groups,
+            available_memory,
         )
 
         return cls(
@@ -145,3 +141,15 @@ class VLLMConfig:
                 kv_cache_groups=kv_cache_groups,
             )
         )
+
+
+def _vllm_config_ns(num_blocks: int):
+    """Minimal VllmConfig-like object for may_override_num_blocks.
+
+    Isolated helper — replace with a real VllmConfig if may_override_num_blocks
+    ever reads beyond cache_config.num_gpu_blocks_override.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        cache_config=SimpleNamespace(num_gpu_blocks_override=num_blocks),
+    )
