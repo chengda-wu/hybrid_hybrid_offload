@@ -392,6 +392,10 @@ class SGLangBackend(KVBackend):
         c128_state_bytes = 2 * 1 * 512 * c128_dt # last_dim=1024, overlap=False
         idx_state_bytes = 2 * 2 * 128 * c4_dt    # indexer uses c4 dtype
 
+        # NOTE: total_bytes uses unscaled full_tokens (fixed byte allocation).
+        # _pool_caps in SGLangConfig use 43/44-scaled tokens (spec draft overhead).
+        # This matches real SGLang: bytes_per_full_token increases in spec mode,
+        # so the same byte budget maps to fewer tokens, but total_bytes is unchanged.
         full_tokens = blocks * scheduler_bs
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size

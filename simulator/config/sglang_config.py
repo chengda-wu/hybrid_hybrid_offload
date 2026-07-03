@@ -40,12 +40,15 @@ class SGLangConfig:
         c4_layers = sum(1 for cr in arch.compress_ratios if cr == 4) if arch.compress_ratios else 0
         c128_layers = sum(1 for cr in arch.compress_ratios if cr == 128) if arch.compress_ratios else 0
 
-        # spec mode: draft worker scaling (pool_configurator.py:538-545)
+        # spec mode: draft worker scaling (pool_configurator.py:538-545),
+        # then page-align (pool_configurator.py:622).  All three pool caps
+        # derive from the scaled+aligned full_tokens.
         num_spec = getattr(bc, "num_spec_tokens", 0) or 0
         if num_spec > 0:
-            full_tokens = full_tokens * arch.num_layers // (arch.num_layers + 1)
+            full_tokens = (full_tokens * arch.num_layers // (arch.num_layers + 1))
+            full_tokens = (full_tokens // ps) * ps  # page-align
 
-        swa_tok = (int(full_tokens * 0.1) // ps) * ps  # page-aligned
+        swa_tok = (int(full_tokens * 0.1) // ps) * ps
 
         return cls(
             page_size=ps,
