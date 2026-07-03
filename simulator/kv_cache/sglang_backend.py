@@ -422,7 +422,8 @@ class SGLangBackend(KVBackend):
                 # DeepSeekV4IndexerPool._create_buffer: no 576 padding.
                 # pages = ceil_div(size + page_size + 1, page_size)
                 c4_tok = full_tokens // 4
-                kv_pages = _ceil_div(c4_tok + info.block_size // 4 + 1, info.block_size // 4)
+                c4_page_tokens = info.block_size // 4  # 64
+                kv_pages = _ceil_div(c4_tok + c4_page_tokens + 1, c4_page_tokens)
                 kv = info.layer_count * kv_pages * info.page_bytes
                 # Indexer state: same size+ring+1 rounding as compressor state
                 raw = swa_slots * c4_ring
@@ -430,10 +431,12 @@ class SGLangBackend(KVBackend):
                 state = state_tok * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
-                # Main KV: full_tokens // page_size pages per layer (pa576 bytes/page).
-                # Real SGLang uses ceil_div(size+page_size+1, page_size) → ~+2 pages/layer.
-                # Difference is ~2 MiB total — negligible vs 15+ GiB pool.
-                group_bytes = info.layer_count * (full_tokens // page_size) * _pad576(info.page_bytes)
+                # Main KV: ceil_div(size + page_size + 1, page_size) pages.
+                # storage_bs = page_bytes // 584 (unpadded bytes / per-token bytes)
+                storage_bs = info.page_bytes // 584
+                size_tok = full_tokens // (info.block_size // storage_bs) if storage_bs else full_tokens
+                kv_pages = _ceil_div(size_tok + storage_bs + 1, storage_bs)
+                group_bytes = info.layer_count * kv_pages * _pad576(info.page_bytes)
             total += group_bytes
         return total
 
