@@ -191,12 +191,12 @@ class SGLangBackend(KVBackend):
         c4_need = to_alloc * self._c4_per_tok
         c128_need = to_alloc * self._c128_per_tok
 
-        # If any pool is over budget, trigger RadixCache eviction
+        # If any pool is over budget, trigger RadixCache eviction.
+        # evict() expects token count, not slot count.
         if (self._pool_used[0] + swa_need > self._pool_caps[0] or
                 self._pool_used[1] + c4_need > self._pool_caps[1] or
                 self._pool_used[2] + c128_need > self._pool_caps[2]):
-            self._cache.evict(EvictParams(
-                num_tokens=max(swa_need, c4_need, c128_need)))
+            self._cache.evict(EvictParams(num_tokens=to_alloc))
             # Re-check: eviction may have freed enough
             if (self._pool_used[0] + swa_need > self._pool_caps[0] or
                     self._pool_used[1] + c4_need > self._pool_caps[1] or
@@ -396,8 +396,11 @@ class SGLangBackend(KVBackend):
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size
 
+        def _ceil_div(a: int, b: int) -> int:
+            return -(-a // b)
+
         def _pad576(raw: int) -> int:
-            return -(-raw // 576) * 576  # ceil_div, matches SGLang create_buffer
+            return _ceil_div(raw, 576) * 576  # matches SGLang create_buffer
 
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
@@ -416,10 +419,10 @@ class SGLangBackend(KVBackend):
                 state_tokens = -(-(raw + c128_ring + 1) // c128_ring) * c128_ring
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
-                # Indexer KV: DeepSeekV4IndexerPool._create_buffer does NOT
-                # apply 576 padding (unlike DeepSeekV4SingleKVPool).
-                # pages = full_tokens // page_size (not blocks, which may differ)
-                kv_pages = full_tokens // page_size
+                # DeepSeekV4IndexerPool._create_buffer: no 576 padding.
+                # pages = ceil_div(size + page_size + 1, page_size)
+                c4_tok = full_tokens // 4
+                kv_pages = _ceil_div(c4_tok + info.block_size // 4 + 1, info.block_size // 4)
                 kv = info.layer_count * kv_pages * info.page_bytes
                 # Indexer state: same size+ring+1 rounding as compressor state
                 raw = swa_slots * c4_ring
@@ -427,7 +430,9 @@ class SGLangBackend(KVBackend):
                 state = state_tok * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
-                # Main KV: pad per-page, full_tokens//page_size pages per layer
+                # Main KV: full_tokens // page_size pages per layer (pa576 bytes/page).
+                # Real SGLang uses ceil_div(size+page_size+1, page_size) → ~+2 pages/layer.
+                # Difference is ~2 MiB total — negligible vs 15+ GiB pool.
                 group_bytes = info.layer_count * (full_tokens // page_size) * _pad576(info.page_bytes)
             total += group_bytes
         return total

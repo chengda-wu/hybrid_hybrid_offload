@@ -35,7 +35,6 @@ class SGLangConfig:
         ps = bc.block_size  # system page_size
 
         full_tokens = blocks * sbs
-        swa_tok = (int(full_tokens * 0.1) // ps) * ps  # page-aligned
 
         arch = bc.model_arch
         c4_layers = sum(1 for cr in arch.compress_ratios if cr == 4) if arch.compress_ratios else 0
@@ -46,9 +45,10 @@ class SGLangConfig:
         if num_spec > 0:
             full_tokens = full_tokens * arch.num_layers // (arch.num_layers + 1)
 
+        swa_tok = (int(full_tokens * 0.1) // ps) * ps  # page-aligned
+
         return cls(
             page_size=ps,
-            # Per-layer token budget × layer count
             swa_tokens=swa_tok * arch.num_layers,
             c4_tokens=(full_tokens // 4) * c4_layers * 2,  # main + indexer
             c128_tokens=(full_tokens // 128) * c128_layers,
