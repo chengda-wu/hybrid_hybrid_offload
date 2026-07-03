@@ -290,7 +290,6 @@ class SGLangBackend(KVBackend):
 
         if num_rejected <= 0:
             return
-        self._deduct_pool_used(num_rejected)
         flat = torch.cat(
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
@@ -332,8 +331,7 @@ class SGLangBackend(KVBackend):
 
         if len(flat) > key_len:
             tail = flat[key_len:]
-            self._mock_allocator.free(tail)
-            self._deduct_pool_used(len(tail))
+            self._mock_allocator.free(tail)  # on_free handles _deduct_pool_used
         sim_req._allocated_indices = []
 
     def reset(self) -> None:

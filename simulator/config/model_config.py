@@ -218,6 +218,7 @@ class KVBackendConfig:
     scheduler_block_size: int = 16
     kv_cache_dtype: str = "auto"
     model_version: str = "deepseek_v4"
+    num_spec_tokens: int = 0
 
     @property
     def num_kv_cache_groups(self) -> int:

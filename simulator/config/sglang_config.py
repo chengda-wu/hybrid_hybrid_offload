@@ -41,6 +41,11 @@ class SGLangConfig:
         c4_layers = sum(1 for cr in arch.compress_ratios if cr == 4) if arch.compress_ratios else 0
         c128_layers = sum(1 for cr in arch.compress_ratios if cr == 128) if arch.compress_ratios else 0
 
+        # spec mode: draft worker scaling (pool_configurator.py:538-545)
+        num_spec = getattr(bc, "num_spec_tokens", 0) or 0
+        if num_spec > 0:
+            full_tokens = full_tokens * arch.num_layers // (arch.num_layers + 1)
+
         return cls(
             page_size=ps,
             # Per-layer token budget × layer count
