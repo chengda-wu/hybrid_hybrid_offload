@@ -15,25 +15,6 @@ from simulator.kv_cache.base import KVBackend
 # ---------------------------------------------------------------------------
 
 
-class ThreePoolTracker:
-    """Per-pool capacity tracker.  RadixCache uses a single index namespace
-    (one index per token).  This tracker deducts from per-pool budgets and
-    triggers eviction when any pool runs out.
-    """
-
-    def __init__(self, num_swa_layers: int, num_c4_layers: int,
-                 num_c128_layers: int):
-        # Per-token slot multipliers (one KV slot per layer per token)
-        self.swa_per_tok = num_swa_layers    # 43
-        self.c4_per_tok = num_c4_layers * 2  # main + indexer = 42
-        self.c128_per_tok = num_c128_layers  # 20
-
-    def full_slots(self, num_tokens: int) -> tuple[int, int, int]:
-        return (num_tokens * self.swa_per_tok,
-                num_tokens * self.c4_per_tok,
-                num_tokens * self.c128_per_tok)
-
-
 class MockTokenToKVPoolAllocator:
     """Minimal mock allocator for standalone RadixCache usage.
 
@@ -75,6 +56,10 @@ class MockTokenToKVPoolAllocator:
             self._free_list.extend(indices.tolist())
         elif isinstance(indices, list):
             self._free_list.extend(indices)
+
+    @property
+    def total_tokens(self) -> int:
+        return self._total
 
     def available_size(self) -> int:
         return self._total - self._next_idx + len(self._free_list)
@@ -225,6 +210,14 @@ class SGLangBackend(KVBackend):
         sim_req._allocated_indices.append(new_indices)
         return new_indices
 
+    def _deduct_pool_used(self, num_tokens: int) -> None:
+        """Decrement per-pool slot usage when tokens are freed."""
+        if num_tokens <= 0:
+            return
+        self._pool_used[0] = max(0, self._pool_used[0] - num_tokens * self._swa_per_tok)
+        self._pool_used[1] = max(0, self._pool_used[1] - num_tokens * self._c4_per_tok)
+        self._pool_used[2] = max(0, self._pool_used[2] - num_tokens * self._c128_per_tok)
+
     def set_spec_tokens(
         self, sim_req: "SGLangSimRequest", tokens: list[int]
     ) -> None:
@@ -289,6 +282,7 @@ class SGLangBackend(KVBackend):
 
         if num_rejected <= 0:
             return
+        self._deduct_pool_used(num_rejected)
         flat = torch.cat(
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
@@ -329,7 +323,9 @@ class SGLangBackend(KVBackend):
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
 
         if len(flat) > key_len:
-            self._mock_allocator.free(flat[key_len:])
+            tail = flat[key_len:]
+            self._mock_allocator.free(tail)
+            self._deduct_pool_used(len(tail))
         sim_req._allocated_indices = []
 
     def reset(self) -> None:
