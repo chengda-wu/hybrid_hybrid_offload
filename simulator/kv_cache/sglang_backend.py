@@ -150,7 +150,9 @@ class SGLangBackend(KVBackend):
 
         Returns (device_indices_tensor, num_matched_tokens).
         """
-        all_tokens = array("q", sim_req.prompt_token_ids + sim_req.output_token_ids)
+        # Only called during prefill (output is empty), matching real SGLang
+        # where match_prefix uses prompt-only tokens.
+        all_tokens = array("q", sim_req.prompt_token_ids)
         from sglang.srt.mem_cache.base_prefix_cache import MatchPrefixParams
         from sglang.srt.mem_cache.radix_cache import RadixKey
 

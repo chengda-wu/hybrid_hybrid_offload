@@ -110,6 +110,11 @@ class SimulatorScheduler:
         # 5. Free finished
         self._cleanup()
 
+        # 5a. Reset cache at warmup boundary (when idle, to clear warmup
+        #     allocations that would inflate measurement-phase cache_hit_rate).
+        if self._step == self._warmup + 1 and not self._running:
+            self._backend.reset()
+
         # 6. If no running requests but waiting queue has arrivals in the
         #    future, fast-forward sim_time to the next arrival.
         if not self._running and self._waiting:

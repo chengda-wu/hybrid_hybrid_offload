@@ -36,6 +36,9 @@ class ModelArchitecture:
     compress_ratios: list[int] | None = None  # per-layer list from config.json
     sliding_window: int | None = None
 
+    # KV options
+    use_fp4_indexer: bool = False  # deepseek_v4_memory_pool.py:279-282
+
     # Derived
     vocab_size: int = 129280
     is_mla: bool = False
@@ -295,7 +298,9 @@ def _build_kv_cache_groups(bc: KVBackendConfig) -> list[KVGroupInfo]:
 
     # 6. C4 Indexer (attention.py:643-655): 132 B/token
     if c4_layers:
-        groups.append(KVGroupInfo("c4_indexer", 256, 64 * 132, len(c4_layers)))
+        # indexer: 132 B/token (fp8) or 68 B/token (fp4, deepseek_v4_memory_pool.py:279-282)
+        idx_bytes = 68 if arch.use_fp4_indexer else 132
+        groups.append(KVGroupInfo("c4_indexer", 256, 64 * idx_bytes, len(c4_layers)))
 
     return groups
 
