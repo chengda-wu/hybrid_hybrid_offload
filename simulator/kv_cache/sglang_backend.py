@@ -370,7 +370,7 @@ class SGLangBackend(KVBackend):
 
         # Ring sizes — import from SGLang (module-level, no server_args needed).
         # Spec mode doubles ring sizes (pool_configurator.py:514).
-        is_spec = getattr(backend_config, "num_spec_tokens", 0) > 0
+        is_spec = self._num_spec_tokens > 0
         from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
             get_compress_state_ring_size,
         )
