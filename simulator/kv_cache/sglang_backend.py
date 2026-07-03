@@ -5,7 +5,8 @@ from __future__ import annotations
 from array import array
 from typing import Any
 
-from simulator.config.model_config import KVBackendConfig, SGLangConfig
+from simulator.config.model_config import KVBackendConfig
+from simulator.config.sglang_config import SGLangConfig
 from simulator.kv_cache.base import KVBackend
 
 

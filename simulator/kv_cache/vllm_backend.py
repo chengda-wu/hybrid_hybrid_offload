@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from simulator.config.model_config import KVBackendConfig, VLLMConfig
+from simulator.config.model_config import KVBackendConfig
+from simulator.config.vllm_config import VLLMConfig
 from simulator.kv_cache.base import KVBackend
 
 if TYPE_CHECKING:
