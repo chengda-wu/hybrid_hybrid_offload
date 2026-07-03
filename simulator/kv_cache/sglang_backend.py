@@ -339,10 +339,14 @@ class SGLangBackend(KVBackend):
                 padded_page = _pad576(swa_page_size * kv_bytes)
                 group_bytes = swa_slots * padded_page * info.layer_count
             elif info.name == "c4_compressor":
-                state_tokens = swa_slots * c4_ring
+                # CompressStatePool._size = ceil(size + ring + 1, ratio) * ratio
+                # (deepseek_v4_compress_state.py:117-123)
+                raw = swa_slots * c4_ring
+                state_tokens = -(-(raw + c4_ring + 1) // c4_ring) * c4_ring
                 group_bytes = state_tokens * c4_state_bytes * info.layer_count
             elif info.name == "c128_compressor":
-                state_tokens = swa_slots * c128_ring
+                raw = swa_slots * c128_ring
+                state_tokens = -(-(raw + c128_ring + 1) // c128_ring) * c128_ring
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
                 # Indexer KV: DeepSeekV4IndexerPool._create_buffer does NOT
