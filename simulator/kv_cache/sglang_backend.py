@@ -336,6 +336,12 @@ class SGLangBackend(KVBackend):
 
     def reset(self) -> None:
         self._cache.reset()
+        self._pool_used = [0, 0, 0]
+        total_slots = sum(self._pool_caps)
+        self._mock_allocator = MockTokenToKVPoolAllocator(
+            total_slots,
+            on_free=lambda n: self._deduct_pool_used(n),
+        )
 
     @property
     def usage(self) -> float:
