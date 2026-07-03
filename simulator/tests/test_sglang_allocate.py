@@ -17,7 +17,7 @@ from simulator.config.model_config import (
 from simulator.kv_cache.sglang_backend import SGLangBackend
 
 
-def _make_backend(num_blocks=128):
+def _make_backend(num_blocks=4096):
     arch = ModelArchitecture.deepseek_v4_flash()
     bsizes = [g[1] for g in arch.layer_groups]
     lcm = bsizes[0]
