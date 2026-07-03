@@ -126,9 +126,9 @@ class VLLMConfig:
         bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
         available_memory = bc.num_kv_cache_blocks * bytes_per_block
 
-        # Build the KVCacheConfig.  We control num_blocks and tensor layout
-        # is handled by _get_kv_cache_config_packed — no need for a real
-        # VllmConfig or SimpleNamespace workaround.
+        # Build KVCacheConfig.  _vllm_config_ns provides a minimal
+        # VllmConfig-like object for may_override_num_blocks (which only
+        # reads cache_config.num_gpu_blocks_override).  See function docstring.
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             _vllm_config_ns(bc.num_kv_cache_blocks),
             kv_cache_groups,

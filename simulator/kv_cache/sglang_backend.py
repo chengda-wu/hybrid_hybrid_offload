@@ -409,18 +409,19 @@ class SGLangBackend(KVBackend):
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size
 
-        def _ceil_div(a: int, b: int) -> int:
-            return -(-a // b)
+        def _floor_div(a: int, b: int) -> int:
+            return (a) // b  # matches SGLang (size+page+1)//page
 
         def _pad576(raw: int) -> int:
-            return _ceil_div(raw, 576) * 576  # matches SGLang create_buffer
+            return -(-raw // 576) * 576  # ceil to 576 for create_buffer
 
         total = 0
         for info in self._backend_config.build_kv_cache_groups():
             if info.name == "swa":
                 # SWA: pad per-page (swa_page_size * kv_bytes), then × slots × layers
                 padded_page = _pad576(swa_page_size * kv_bytes)
-                group_bytes = swa_slots * padded_page * info.layer_count
+                swa_pages = (swa_tokens + swa_page_size + 1) // swa_page_size
+                group_bytes = swa_pages * padded_page * info.layer_count
             elif info.name == "c4_compressor":
                 # CompressStatePool._size = ceil(size + ring + 1, ratio) * ratio
                 # (deepseek_v4_compress_state.py:117-123)
@@ -436,7 +437,7 @@ class SGLangBackend(KVBackend):
                 # pages = ceil_div(size + page_size + 1, page_size)
                 c4_tok = full_tokens // 4
                 c4_page_tokens = info.block_size // 4  # 64
-                kv_pages = _ceil_div(c4_tok + c4_page_tokens + 1, c4_page_tokens)
+                kv_pages = _floor_div(c4_tok + c4_page_tokens + 1, c4_page_tokens)
                 kv = info.layer_count * kv_pages * info.page_bytes
                 # Indexer state: same size+ring+1 rounding as compressor state
                 raw = swa_slots * c4_ring
@@ -448,7 +449,7 @@ class SGLangBackend(KVBackend):
                 # storage_bs = page_bytes // 584 (unpadded bytes / per-token bytes)
                 storage_bs = info.page_bytes // 584
                 size_tok = full_tokens // (info.block_size // storage_bs) if storage_bs else full_tokens
-                kv_pages = _ceil_div(size_tok + storage_bs + 1, storage_bs)
+                kv_pages = _floor_div(size_tok + storage_bs + 1, storage_bs)
                 group_bytes = info.layer_count * kv_pages * _pad576(info.page_bytes)
             total += group_bytes
         return total

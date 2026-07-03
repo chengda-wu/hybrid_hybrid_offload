@@ -28,6 +28,7 @@ class SimulationEngine:
             self._model_arch = ModelArchitecture.from_json(config.model_config_path)
         else:
             self._model_arch = ModelArchitecture.deepseek_v4_flash()
+        self._model_arch.use_fp4_indexer = config.use_fp4_indexer
 
         # Build backend config.
         # For hybrid models, compute scheduler_block_size as LCM of group block sizes

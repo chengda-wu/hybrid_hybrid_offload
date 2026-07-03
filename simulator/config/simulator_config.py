@@ -129,6 +129,9 @@ class SimulatorConfig:
     max_model_len: int = 8192
     num_kv_cache_blocks: int = 4096
 
+    # Model options
+    use_fp4_indexer: bool = False  # deepseek_v4 indexer fp4 mode
+
     # Execution
     warmup_steps: int = 10  # steps to exclude from metrics
     random_seed: int = 42

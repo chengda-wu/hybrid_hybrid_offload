@@ -162,6 +162,7 @@ class ModelArchitecture:
             compress_ratios=compress_ratios,
             sliding_window=cfg.get("sliding_window"),
             vocab_size=cfg.get("vocab_size", 129280),
+            use_fp4_indexer=cfg.get("enable_deepseek_v4_fp4_indexer", False),
         )
 
     @classmethod

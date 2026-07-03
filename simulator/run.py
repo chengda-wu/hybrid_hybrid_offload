@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
                 draft_accuracy=args.draft_accuracy,
             ),
             model_config_path=args.model_config,
+            use_fp4_indexer=args.fp4_indexer,
             kv_cache_block_size=args.kv_block_size,
             max_model_len=args.max_model_len,
             num_kv_cache_blocks=args.num_kv_blocks,
@@ -109,6 +110,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Model
     p.add_argument("--model-config", type=str, help="Path to HF config.json")
+    p.add_argument("--fp4-indexer", action="store_true",
+                   help="Use fp4 indexer (68 B/token instead of 132)")
 
     # Execution
     p.add_argument("--seed", type=int, default=42)
