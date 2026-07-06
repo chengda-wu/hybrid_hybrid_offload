@@ -39,7 +39,13 @@ class SimulationReport:
     # ---- Throughput ----
     total_requests: int
     total_tokens_generated: int
-    total_sim_time_ms: float
+    total_sim_time_ms: float        # Wall-clock sim_time at the last recorded
+                                    # (post-warmup) step.  This value accumulates
+                                    # from step 1, so it INCLUDES warmup duration
+                                    # and idle fast-forward gaps.  It is NOT the
+                                    # throughput denominator — tokens_per_second
+                                    # divides total_tokens by GPU-busy time
+                                    # (sum of step_latency over post-warmup steps).
     tokens_per_second: float
 
     # ---- Config ----
