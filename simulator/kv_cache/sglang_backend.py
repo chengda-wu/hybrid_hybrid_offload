@@ -68,11 +68,6 @@ class MockTokenToKVPoolAllocator:
     def total_tokens(self) -> int:
         return self._total
 
-    def reset(self) -> None:
-        """Clear pool state — reuses same object so RadixCache ref stays valid."""
-        self._next_idx = self._offset
-        self._free_list.clear()
-
     def available_size(self) -> int:
         return self._total - self._next_idx + len(self._free_list)
 
@@ -341,11 +336,6 @@ class SGLangBackend(KVBackend):
             self._mock_allocator.free(tail)  # on_free handles _deduct_pool_used
         sim_req._allocated_indices = []
 
-    def reset(self) -> None:
-        self._cache.reset()
-        self._pool_used = [0, 0, 0]
-        self._mock_allocator.reset()  # reuse same object, RadixCache holds ref
-
     @property
     def usage(self) -> float:
         # Average of three-pool utilization
@@ -426,11 +416,11 @@ class SGLangBackend(KVBackend):
                 # CompressStatePool._size = ceil(size + ring + 1, ratio) * ratio
                 # (deepseek_v4_compress_state.py:117-123)
                 raw = swa_slots * c4_ring
-                state_tokens = -(-(raw + c4_ring + 1) // c4_ring) * c4_ring
+                state_tokens = -(-(raw + c4_ring + 1) // 4) * 4
                 group_bytes = state_tokens * c4_state_bytes * info.layer_count
             elif info.name == "c128_compressor":
                 raw = swa_slots * c128_ring
-                state_tokens = -(-(raw + c128_ring + 1) // c128_ring) * c128_ring
+                state_tokens = -(-(raw + c128_ring + 1) // 128) * 128
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
                 # DeepSeekV4IndexerPool._create_buffer: no 576 padding.
@@ -441,7 +431,7 @@ class SGLangBackend(KVBackend):
                 kv = info.layer_count * kv_pages * info.page_bytes
                 # Indexer state: same size+ring+1 rounding as compressor state
                 raw = swa_slots * c4_ring
-                state_tok = -(-(raw + c4_ring + 1) // c4_ring) * c4_ring
+                state_tok = -(-(raw + c4_ring + 1) // 4) * 4
                 state = state_tok * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:

@@ -76,11 +76,6 @@ class KVBackend(ABC):
         """Free all blocks for a request."""
         ...
 
-    @abstractmethod
-    def reset(self) -> None:
-        """Reset the entire cache (for warmup boundaries)."""
-        ...
-
     @property
     @abstractmethod
     def usage(self) -> float:

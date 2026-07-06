@@ -79,7 +79,9 @@ class VLLMConfig:
                         alignment=576, model_version=bc.model_version,
                     )))
             elif name == "c4_indexer":
-                idx_hd = 68 if arch.use_fp4_indexer else 132
+                # vLLM indexer always allocates 132 B/token regardless of fp4/fp8
+                # (attention.py:725-729 — fp4 uses same allocation, half unused)
+                idx_hd = 132
                 groups.append(KVCacheGroupSpec(
                     [f"model.layers.{i}.self_attn.k_cache" for i in range(nlayers)],
                     MLAAttentionSpec(

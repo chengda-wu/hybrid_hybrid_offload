@@ -114,9 +114,6 @@ class vLLMBackend(KVBackend):
             self._manager.free(sim_req._vllm_request)
             sim_req._vllm_request = None
 
-    def reset(self) -> None:
-        self._manager.reset_prefix_cache()
-
     @property
     def usage(self) -> float:
         num_free = self.num_free_blocks
