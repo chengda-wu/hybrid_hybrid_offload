@@ -67,6 +67,8 @@ python -m simulator.run [OPTIONS]
 
 仿真器用公式 `latency = a×loaded + b×computed + c×loaded×computed + d` 拟合 GPU 延迟，系数通过最小二乘法从数据点自动计算。
 
+> **绝对延迟不可信**：未提供 `--gpu-data-points` 时，使用内置的 H100-like 估值默认值（`GPUPerfModel.DEFAULT_DATA`），**非实测**。因此报告中的绝对 ms 值（TTFT/TPOT/step_latency）仅供相对趋势参考，不能当作真实 DSV4 性能基准。需要可信绝对值时，请用真实 benchmark 数据喂 `--gpu-data-points` 重新拟合。
+
 每条数据点包含三个值：
 
 | 位置 | 名称 | 含义 |
