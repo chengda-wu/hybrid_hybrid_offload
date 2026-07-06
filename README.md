@@ -321,9 +321,9 @@ python -m simulator.run --config batch_experiment.json -o result.json
 
 ### 已知简化
 
-- **无测试覆盖**：当前无单元/集成测试（21 个 unittest 覆盖 allocate/acceptance/perf model，但缺 scheduler 和 E2E 集成测试），所有改动依赖人工 review。
+- **测试覆盖**：27 个 unittest 覆盖 acceptance / GPU perf / SGLang allocate / scheduler E2E（`simulator/tests/`，含 `integration/test_scheduler_e2e.py` 跑两后端 spec-on/off 全流程 + prefill OOM 回归，带 wall-clock timeout 防 hang）。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
-- **无抢占**：分配失败时请求留在 PRE_FILL 状态重试，不会被换出。
+- **无抢占**：prefill 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。
 - **FP4 indexer**：通过 `--fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
