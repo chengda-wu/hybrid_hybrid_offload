@@ -68,7 +68,17 @@ class KVBackend(ABC):
 
     def free_rejected_slots(self, sim_req: Any, num_rejected: int) -> None:
         """Free rejected spec token slots.  vLLM: no-op (position rollback).
-        SGLang: explicit free from mock pool."""
+        SGLang: explicit free from mock pool.
+
+        Note for vLLM: real vLLM's ``update_from_output`` frees the blocks of
+        rejected draft tokens (it rolls back ``num_computed_tokens`` and the
+        block pool releases the trailing blocks).  This simulation approximates
+        that as a no-op — rejected slots stay allocated until the request is
+        ``free()``-ed.  Under frequent speculation rejection this overestimates
+        vLLM cache ``usage`` and may trigger OOM earlier than real vLLM would.
+        Acceptable for latency-focused experiments; revisit if modeling vLLM
+        eviction/OOM behavior precisely.
+        """
         pass
 
     @abstractmethod
