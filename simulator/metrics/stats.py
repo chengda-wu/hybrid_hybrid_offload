@@ -107,11 +107,16 @@ class StatisticsComputer:
         total_spec = total_accept + total_reject
         avg_accept_rate = total_accept / total_spec if total_spec > 0 else 0.0
 
-        # Throughput
+        # Throughput.  Denominator = sum of step latencies over the recorded
+        # (post-warmup) steps — i.e. GPU-busy time, excluding warmup and idle
+        # fast-forward gaps.  This stays self-consistent with the numerator
+        # (tokens from requests that finished post-warmup).
         total_generated = sum(r.output_length for r in reqs)
-        total_time = max(s.sim_time_ms for s in steps) if steps else 0.0
+        total_busy_time = sum(s.step_latency_ms for s in steps)
+        total_sim_time = max(s.sim_time_ms for s in steps) if steps else 0.0
         tokens_per_sec = (
-            1000.0 * total_generated / total_time if total_time > 0 else 0.0
+            1000.0 * total_generated / total_busy_time
+            if total_busy_time > 0 else 0.0
         )
 
         return SimulationReport(
@@ -130,7 +135,7 @@ class StatisticsComputer:
             avg_acceptance_rate=round(avg_accept_rate, 4),
             total_requests=len(reqs),
             total_tokens_generated=total_generated,
-            total_sim_time_ms=round(total_time, 2),
+            total_sim_time_ms=round(total_sim_time, 2),
             tokens_per_second=round(tokens_per_sec, 1),
             backend=backend,
             kv_cache_size_gb=round(kv_cache_size_gb, 2),
