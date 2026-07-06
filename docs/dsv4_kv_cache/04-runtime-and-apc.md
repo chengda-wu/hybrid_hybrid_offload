@@ -33,10 +33,68 @@ hash_block_size      = GCD(...) = 4      # block hash 计算粒度（prefix cach
 | `free(req)` | 每组 manager 减 ref_cnt；归 0 才还 free list | `kv_cache_manager.py:462`, `coordinator.py:285` |
 | spec decode | `_update_after_schedule` 预分配 1+K block；`update_from_output` 释放被拒的 | `v1/core/sched/scheduler.py:1154,1488` |
 
-**`_sw` 类型的窗口外跳过（两层机制）**：
-- **分配侧**：`SlidingWindowManager.get_num_skipped_tokens(n) = max(0, n - sliding_window + 1)`（`single_type_kv_cache_manager.py:864`）。窗口外的 token 不分配真实 block，block table 里用 `null_block`（id=0）占位。这省下窗口外的 KV 内存（见 §7.3 实测）。影响所有 `_sw` 类型（`SWA_sw`/`C4comp_sw`/`C128comp_sw`/`C4idxcomp_sw`）。
-- **计算侧**：attention 时靠 `decode_swa_indices` 只索引窗口内 slot（`sparse_swa.py:612` triton kernel），null_block 位置不参与计算。
-- G0(MLA, `C4mla`/`C128mla`/`C4idx` 为 FullAttention) 不跳过，所有 token 都分配真实 block。
+**`_sw` 类型的窗口外跳过（三层机制）**：影响所有 `_sw` 类型（`SWA_sw`/`C4comp_sw`/`C128comp_sw`/`C4idxcomp_sw`）。G0（MLA, `C4mla`/`C128mla`/`C4idx` 为 FullAttention）不跳过，所有 token 都分配真实 block。详见 §6.1。
+
+### 6.1 SWA skip 机制：skip token 与 skip block
+
+`SlidingWindowMLASpec` 的窗口外 KV 不需要保留，vLLM 在**三个层面**协同跳过，殊途同归地省下窗口外的 KV 内存：
+
+#### (1) 分配侧 —— skip token 决定 skip block（运行时持续释放）
+
+核心公式（`SlidingWindowManager.get_num_skipped_tokens`，`single_type_kv_cache_manager.py:838,864`）：
+
+```
+num_skipped_tokens(n) = max(0, n - sliding_window + 1)      # n = num_computed_tokens
+num_skipped_blocks    = num_skipped_tokens // block_size
+```
+
+含义：当前已计算 `n` 个 token，下一个 token 的注意力窗口覆盖 `[n - sw + 1, n]`，窗口**之前**的 token 都可跳过。`n < sw` 时 skip=0（窗口还没移出序列头）。
+
+每次 `allocate_slots`（`kv_cache_manager.py:400`）开头先调 `remove_skipped_blocks`（`single_type_kv_cache_manager.py:507`）：
+- 算出 `num_skipped_blocks`，把 block table **前** `num_skipped_blocks` 个真实 block 替换成 `null_block`（id=0）并归还 free list（`_remove_blocks_in_range:480`）。
+- block table **长度不变**：被释放的 block 用 `null_block` 占位，保持 token→block 索引关系，attention kernel 靠位置算窗口，不读 null 标记。
+- `allocate_new_blocks`（base class，`:279`）随后只为新 token 追加 block：`num_new = cdiv(num_tokens, bs) - len(req_blocks)`，因 `len(req_blocks)` 含 null 占位，不会因 skip 多分配。
+
+**prefill vs decode 的关键区别**（实测，A = 512 token prompt）：
+
+| 阶段 | `n=num_computed` | `get_num_skipped_tokens` | G1 (bs64,sw128) | G3 (bs4,sw8) | G4 (bs8,sw128) |
+|------|------|------|------|------|------|
+| prefill 512 | 0 | 0 | real=8, null=0 | real=128, null=0 | real=64, null=0 |
+| decode step 1 | 513 | 386 | real=3, null=6 | real=3, null=126 | real=17, null=48 |
+
+prefill 时 `n=0` → skip=0 → 整个 prompt 全分配真实 block（§7.1 表格的 8/128/64 即此）。decode 第 1 步 `n=513` → 窗口外的 block 被释放成 null，只剩窗口内 `cdiv(sw, bs)` 量级的真实 block。**SWA 的 KV 内存节省是 decode 稳态属性，不是 prefill 属性。**
+
+> 实测 decode step 1 的真实 block 数：G1 `real=3` = 窗口 128 token ÷ bs64 ≈ 2 block + 当前新 block；G3 `real=3` ≈ 窗口 8 token ÷ bs4 = 2 block + 新 block；G4 `real=17` ≈ 窗口 128 ÷ bs8 = 16 block + 新 block。均符合 `cdiv(sw, bs) + 1` 量级。
+
+#### (2) 命中侧 —— 连续 block 命中（APC 查找）
+
+`SlidingWindowManager.find_longest_cache_hit`（`single_type_kv_cache_manager.py:688`）与分配侧用同一个 `get_num_skipped_tokens`，但实现不同：
+
+1. 先把整个候选命中区间 `[0, max_num_blocks)` **全部预填 `null_block`**（`:718`）。
+2. 需要连续 `cdiv(sliding_window - 1, block_size)` 个真实 block 命中才算 hit（`_contiguous_blocks_for_hit:675,678`）——因为窗口必须完整覆盖这么多 block 才能复用。
+3. **从右往左**扫描，找到连续命中后 trim 掉右侧多余 null，**左侧的 null 全部保留**作为窗口外占位。
+
+故命中块序列 = 若干 `null_block`（窗口外）+ 窗口内真实 block。null 数 = `命中块数 - cdiv(sw-1, bs)`。详见 §7.3 推导表。
+
+#### (3) 计算侧 —— triton kernel 只 gather 窗口内 KV
+
+attention forward 时，`_compute_swa_indices_and_lens_kernel`（`sparse_swa.py:612`）对每个 query position `pos` 算：
+
+```
+start_pos = max(pos - window_size + 1, 0)     # sparse_swa.py:644
+```
+
+只在该 `[start_pos, pos]` 窗口内 gather KV。block table 里 `null_block` 占位的位置即便被间接索引到，也是全零且落在窗口外（mask 掉），不参与计算。`decode_swa_indices`（`sparse_swa.py:339,412`）预计算每个 decode token 的窗口索引下标。
+
+#### 三层的关系
+
+| 层面 | 作用对象 | 何时生效 | 用 null_block? |
+|------|---------|---------|---------------|
+| 分配侧 `get_num_skipped_tokens` + `remove_skipped_blocks` | block table（释放窗口外 block） | 每次 `allocate_slots`（decode 推进后） | 是，替换被释放 block |
+| 命中侧 `find_longest_cache_hit` | APC 命中块序列 | `get_computed_blocks` 查 prefix cache | 是，预填窗口外占位 |
+| 计算侧 triton kernel | attention 的 KV gather | 每次前向 | 否，靠 `pos` 算窗口，null 位置被 mask |
+
+三层共用"窗口 = `[n - sw + 1, n]`"这一语义，但分别管**内存释放**、**prefix 命中**、**计算 gather**。null_block 是分配侧/命中侧的 block table 占位手段，计算侧不依赖它。
 
 ---
 
@@ -64,7 +122,7 @@ hash_block_size      = GCD(...) = 4      # block hash 计算粒度（prefix cach
 
 > 注：G1-G4 都是 `SlidingWindowMLASpec`（`_sw`），用 `SlidingWindowManager`，会跳过窗口外的 token（见 §7.3）。G0 是 `FullAttentionManager`，不跳过。
 
-> **上表是 prefill 视角的 block 数**（`ceil(N / block_size)`，纯按 block_size 切分）。prefill 时 `num_computed_tokens = 0`，`get_num_skipped_tokens(0) = 0`（`single_type_kv_cache_manager.py:864`），窗口外跳过尚未生效，故 512 token 全分配——G1/G2 各 8 个真实 block、G3 128 个、G4 64 个，**0 个 null**。窗口外 block 的释放在 **decode 阶段窗口移动后**才发生：每步 decode `remove_skipped_blocks`（`kv_cache_manager.py:400`）把 `get_num_skipped_tokens(computed) // block_size` 个窗口外 block 替换成 `null_block` 并归还 free list。实测 A prefill 512 后第 1 步 decode（computed=513）：G1 `real 8→3`、G3 `real 128→3`、G4 `real 64→17`，其余变 null。故 SWA 的 KV 内存节省体现在 decode 稳态，不在 prefill 当下。
+> **上表是 prefill 视角的 block 数**（`ceil(N / block_size)`，纯按 block_size 切分）。prefill 时 `num_computed_tokens = 0` → `get_num_skipped_tokens(0) = 0`，窗口外跳过尚未生效，512 token 全分配真实 block（0 个 null）。窗口外 block 在 decode 阶段窗口移动后才被释放成 null。完整机制与 prefill/decode 实测对比见 **§6.1**。
 
 ### 7.2 Phase 1：A 到达，全分配（无命中）
 
@@ -88,7 +146,7 @@ A forward 后 `cache_blocks` 把满 block 的 `(block_hash, group_id) → block_
 
 B 前 256 token 与 A 相同 → block hash 链前 `256/4 = 64` 个 hash 与 A 一致。`get_computed_blocks` → `find_longest_cache_hit`（`coordinator.py:630`）逐组查 hashmap，命中长度按 `scheduler_block_size=256` 对齐（`single_type_kv_cache_manager.py:606`）。
 
-**关键：`_sw` group 的窗口跳过机制**。`SlidingWindowManager.get_num_skipped_tokens(n) = max(0, n - sliding_window + 1)`（`single_type_kv_cache_manager.py:864`）是**分配侧**公式（`allocate_slots` 时窗口外 token 不分配真实 block）。**命中侧**（`find_longest_cache_hit`，`single_type_kv_cache_manager.py:688`）逻辑等价但实现不同：先把整个命中区间预填 `null_block`，再**从右往左**找连续 `cdiv(sliding_window - 1, block_size)` 个命中的真实 block，找到后 trim 掉右侧多余的 null，**左侧的 null 全部保留**作为窗口外占位。两种机制殊途同归：命中块序列 = 若干 `null_block` + 窗口内的真实 block。G0 是 FullAttention，不跳过，全部真实。
+**关键：`_sw` group 的命中含 null_block**。命中侧（`find_longest_cache_hit`）预填 null 后从右往左找连续 `cdiv(sw-1, bs)` 个真实命中，左侧 null 保留作窗口外占位（机制详见 §6.1(2)）。故 `_sw` group 的命中块序列 = 若干 `null_block` + 窗口内真实 block；G0 是 FullAttention，全真实。
 
 实测 B 命中（`num_computed = 256`）：
 
