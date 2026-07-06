@@ -129,6 +129,45 @@ class TestAllocateSlots(unittest.TestCase):
         self.assertGreaterEqual(num_matched, 256,
                                 f"bonus token may not be in tree: matched {num_matched}")
 
+    def test_free_rejected_slots_frees_only_tail(self):
+        """free_rejected_slots must free exactly the last N allocated tokens.
+
+        Locks the tail-assumption contract: a decode step allocates 1+K tokens
+        appended at the tail; rejecting N of them frees the global last N
+        indices and leaves the prefix (512 + 1 accepted) intact.
+        """
+        import torch
+
+        backend = _make_backend()
+        req = backend.create_request("r1", list(range(512)), max_tokens=20)
+        backend.register_request(req)
+        # Prefill: 512 tokens
+        backend.allocate_slots(req, num_new_tokens=512)
+        backend.sync_state(req, [])
+
+        n_before = sum(len(t) for t in req._allocated_indices)
+        self.assertEqual(n_before, 512)
+
+        # Decode step: allocate 1+K = 3 tokens (bonus + 2 spec)
+        backend.allocate_slots(req, num_new_tokens=3)
+        n_after_alloc = sum(len(t) for t in req._allocated_indices)
+        self.assertEqual(n_after_alloc, 515)
+
+        # Reject 1 spec token: should free exactly the last 1 index.
+        backend.free_rejected_slots(req, num_rejected=1)
+        n_after_free = sum(len(t) for t in req._allocated_indices)
+        self.assertEqual(n_after_free, 514,
+                         "free_rejected_slots should free exactly num_rejected "
+                         "from the tail, leaving 512 + 1 bonus + 1 accepted")
+
+        # The surviving indices must still include the original prefill prefix:
+        # the first 512 indices are unchanged.
+        flat = torch.cat([t for t in req._allocated_indices if len(t) > 0])
+        self.assertEqual(len(flat), 514)
+        # Allocator should have reclaimed exactly 1 index.
+        self.assertEqual(backend._mock_allocator.available_size(),
+                         backend._mock_allocator.total_tokens - 514)
+
 
 if __name__ == "__main__":
     unittest.main()

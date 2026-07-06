@@ -296,6 +296,18 @@ class SGLangBackend(KVBackend):
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
         if len(flat) >= num_rejected:
+            # Contract guard: rejected slots must be the global tail of the
+            # flattened allocation log.  This holds only because each decode
+            # step calls allocate_slots exactly once (1+K tokens, appended at
+            # the tail) and accepted tokens are never freed mid-request.  If a
+            # future change adds multi-segment per-step allocation or partial
+            # mid-step frees, this assertion will fire — at which point
+            # free_rejected_slots must switch to tracking per-step segment
+            # bounds instead of assuming a global tail.
+            assert len(flat) - num_rejected >= 0, (
+                "free_rejected_slots would underflow: the tail-assumption "
+                "contract is broken (see docstring)."
+            )
             self._mock_allocator.free(flat[-num_rejected:])
             # Remove freed indices from _allocated_indices
             keep_len = len(flat) - num_rejected
