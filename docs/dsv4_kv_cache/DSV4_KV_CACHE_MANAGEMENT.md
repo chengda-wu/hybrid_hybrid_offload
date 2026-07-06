@@ -196,6 +196,12 @@ Slot   ──对应──▶ 一个 KVCacheTensor(offset, block_stride) = 物理
 
 d=22 时 padding 最小（5）。于是每组 round_up 到 22 的倍数，**层数超过 22 的组分裂成多个子组**：U1(SWA) 43 层 → `ceil(43/22)=2` 个子组（22+21）；其余组 ≤22 不分裂。
 
+**为什么 tuple 数必须相同（分裂的根因）**：packed 布局里所有 group 共用同一个 block pool、同一个 `block_stride`（`bytes_per_block`）。一个物理 block 被 group G 持有时，G 的所有层都往里写（§4.6），即 G 在每个涉及 page_size 上各填"层数"个 slot。要让所有 group 的 `bytes_per_block = Σ ps × slot_count` 相同（否则无法共享 pool），各组在每个 ps 上的 slot 数必须统一——而 slot 数 = 该组该 ps 的层数 = tuple 数。**tuple 数不同 → slot 数不同 → block 大小不同 → 无法共享 pool**。故必须把所有组 round_up 到同一个 `num_layer_tuples`，超出的组（如 SWA 43 > 22）就分裂成多个子组。
+
+**为什么选 d=22 而不是 d=43（不分裂）**：这是"分裂 vs padding"的权衡。若选 d=43（SWA 不分裂），其余组 round_up 到 43：G0 21→43、C4comp 21→43、C128comp 20→43，各 pad 20+ 个空 tuple，总 padding=67。选 d=22 时 SWA 分裂成 22+21（只 pad 1 层），其余组各 pad 1-2 层，总 padding=5。`_approximate_gcd` 选最小化总 padding 的 d，故选 22 并让 SWA 分裂——比让所有组 pad 到 43 更省内存。
+
+> **分裂 ≠ 层被拆散**：SWA 43 层分裂成 G1(22)+G2(21) 后，每层仍完整属于一个子组，只是分到不同 block table。运行时 G1 和 G2 是两个独立 `SingleTypeKVCacheManager`，各自从共享 free list 捞 block（§4.4）。
+
 ### 3.3 最终 5 个 group（实测）
 
 | group | spec 类型 | block_size | layer_count | 内含 cache | page_sizes |
