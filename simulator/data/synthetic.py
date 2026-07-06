@@ -134,9 +134,9 @@ class SyntheticDataGenerator:
         if pattern == "burst":
             return 0.0
         elif pattern == "poisson":
-            # Exponential inter-arrival: mean = 1000/rate ms
-            if index == 1:
-                self._next_arrival = 0.0
+            # Exponential inter-arrival: mean = 1000/rate ms.
+            # _next_arrival starts at 0.0 (set in __init__), so the first
+            # request (index 0) returns 0.0 above; subsequent ones accumulate.
             gap = self._rng.expovariate(self._arrival.poisson_rate)
             self._next_arrival += gap * 1000.0  # seconds → ms
             return self._next_arrival

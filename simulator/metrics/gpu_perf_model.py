@@ -147,9 +147,7 @@ class GPUPerfModel:
         # c (interaction) and d (base) can legitimately be negative:
         # c < 0 when large batches amortize overhead; d < 0 when
         # data trends below the origin.  Clamping would distort
-        # predictions.
-        self._c = self._c
-        self._d = self._d
+        # predictions, so they are left as-is.
 
         self._fitted = True
 
