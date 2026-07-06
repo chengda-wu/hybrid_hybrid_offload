@@ -68,6 +68,18 @@ class TestAcceptanceRatesValidation(unittest.TestCase):
         )
         AcceptanceModel(cfg, seed=42)  # fixed mode doesn't use acceptance_rates
 
+    def test_per_position_empty_rates_falls_back_to_half(self):
+        # per_position with no acceptance_rates must not silently guess; it
+        # falls back to a flat 0.5 conditional rate (and logs a warning).
+        # Verified by observing the conditional rate the model uses.
+        cfg = SpeculativeDecodeConfig(
+            accept_mode="per_position",
+            acceptance_rates=None,
+            num_spec_tokens=3,
+        )
+        model = AcceptanceModel(cfg, seed=42)
+        self.assertEqual(model._cond_rates, [0.5, 0.5, 0.5])
+
 
 class TestAcceptanceLogic(unittest.TestCase):
     """Core acceptance behavior — chain-breaking, deterministic at 0.0/1.0."""

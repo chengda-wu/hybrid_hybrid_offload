@@ -66,7 +66,7 @@ SimulatorConfig → SimulationEngine
 Real HF config: 43 layers, `compress_ratios = [0,0,4,128,4,128,...,4]` → SWA=2, C4=21, C128=20.
 
 vLLM packs 6 groups into a **shared** block pool (one physical allocation via offset+block_stride):
-1. SWA (bs=64, all 43L)
+1. SWA (bs=64, all 43L) — becomes 44L under spec decode (K>0): the MTP draft layer adds one SWA-only layer to this bucket (compress_ratio=1, no MLA/compressor/indexer). See `vllm_config.py::_build_vllm_specs` and README "spec-on" note.
 2. C4 Compressor (bs=4, float32, state_dim=2048, 21L)
 3. C128 Compressor (bs=8, float32, state_dim=1024, 20L)
 4. C4 Main MLA (bs=256, cr=4, 21L)

@@ -123,17 +123,28 @@ class StatisticsComputer:
             total_accept / total_spec if total_spec > 0 else None
         )
 
-        # Throughput.  Denominator = sum of step latencies over the recorded
-        # (post-warmup) steps — i.e. GPU-busy time, excluding warmup and idle
-        # fast-forward gaps.  This stays self-consistent with the numerator
-        # (tokens from requests that finished post-warmup).
-        total_generated = sum(r.output_length for r in reqs)
+        # Throughput.  Both numerator and denominator are summed over the
+        # recorded (post-warmup) steps, so they are self-consistent:
+        #   - numerator   = sum of tokens actually *produced* in post-warmup
+        #                   steps (bonus + accepted spec), NOT the full
+        #                   output_length of requests that happened to finish
+        #                   post-warmup (which would double-count tokens
+        #                   generated during warmup);
+        #   - denominator = sum of step latencies over those same steps
+        #                   (GPU-busy time, excluding warmup and idle
+        #                   fast-forward gaps).
+        total_generated_throughput = sum(s.total_generated_tokens for s in steps)
         total_busy_time = sum(s.step_latency_ms for s in steps)
         total_sim_time = max(s.sim_time_ms for s in steps) if steps else 0.0
         tokens_per_sec = (
-            1000.0 * total_generated / total_busy_time
+            1000.0 * total_generated_throughput / total_busy_time
             if total_busy_time > 0 else 0.0
         )
+
+        # total_tokens_generated reports the full output of requests that
+        # completed post-warmup (a count of work done, not a throughput
+        # numerator).
+        total_generated = sum(r.output_length for r in reqs)
 
         per_pos_rates = (
             list(acceptance_model.per_position_acceptance_rates)

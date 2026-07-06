@@ -20,6 +20,7 @@ class StepRecord:
     total_loaded_tokens: int    # sum of cache-hit tokens across all requests
     total_computed_tokens: int  # sum of new tokens computed
     total_accepted_tokens: int  # sum of accepted spec tokens
+    total_generated_tokens: int # output tokens produced (bonus + accepted spec)
 
 
 @dataclass
@@ -58,6 +59,7 @@ class MetricsRecorder:
         loaded_tokens: int,
         computed_tokens: int,
         accepted_tokens: int,
+        generated_tokens: int,
     ) -> None:
         self.steps.append(
             StepRecord(
@@ -70,6 +72,7 @@ class MetricsRecorder:
                 total_loaded_tokens=loaded_tokens,
                 total_computed_tokens=computed_tokens,
                 total_accepted_tokens=accepted_tokens,
+                total_generated_tokens=generated_tokens,
             )
         )
 

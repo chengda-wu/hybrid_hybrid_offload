@@ -45,7 +45,15 @@ class AcceptanceModel:
         self._rng = random.Random(seed)
         self._K = config.num_spec_tokens
 
-        # Per-position accumulators for the report (marginal rates).
+        # Per-position accumulators for the report (marginal rates, caliber A:
+        # denominator = all spec-decode steps).  A single global step count is
+        # used for every position so that rates[i] = accepted[i] / total_steps
+        # reproduces the marginal P(draft_i accepted).  Later positions are
+        # naturally lower for short outputs whose sequences end mid-chain (those
+        # steps still count in the denominator but the trailing positions had
+        # no draft to accept) — this matches how a real speculator's
+        # end-to-end per-position rate behaves near EOS, and converges to the
+        # input marginal for long outputs.
         self._per_pos_accepted: list[int] = [0] * self._K
         self._total_spec_steps: int = 0
 
@@ -65,7 +73,21 @@ class AcceptanceModel:
                         f"(one per draft position)."
                     )
                 self._cond_rates = self._marginal_to_conditional(rates[: self._K])
-            else:
+            elif self._K > 0:
+                # No rates provided in per_position mode — fall back to a flat
+                # 0.5 conditional rate so the simulation still runs, but warn:
+                # this is a guess, not a measurement, and the reported
+                # per_position_acceptance_rates will reflect it.
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "accept_mode='per_position' but acceptance_rates is empty "
+                    "— falling back to a flat 0.5 conditional rate for all %d "
+                    "draft positions.  Pass --acceptance-rates (real measured "
+                    "marginal rates) for a faithful simulation.  (This warning "
+                    "is printed once.)",
+                    self._K,
+                )
                 self._cond_rates = [0.5] * self._K
 
     @staticmethod
@@ -129,7 +151,9 @@ class AcceptanceModel:
         num_accepted = 0
         beyond_ground_truth = 0
 
-        # One spec-decode step evaluated (for marginal-rate denominator).
+        # One spec-decode step evaluated (caliber-A marginal denominator:
+        # every step with ≥1 draft counts, including those whose drafts fall
+        # beyond ground truth — they are still spec-decode steps).
         if K <= self._K:
             self._total_spec_steps += 1
 
@@ -158,10 +182,13 @@ class AcceptanceModel:
 
     @property
     def per_position_acceptance_rates(self) -> list[float]:
-        """Measured marginal per-position acceptance rates (accepted / spec steps).
+        """Measured marginal per-position acceptance rates (caliber A).
 
-        Empty when no spec steps ran. ``rates[i]`` should converge to the input
-        marginal ``acceptance_rates[i]``.
+        ``rates[i] = accepted[i] / total_spec_steps`` where the denominator is
+        every spec-decode step (steps with ≥1 draft), matching the end-to-end
+        per-position rate a real speculator reports.  Converges to the input
+        marginal ``acceptance_rates[i]`` for long outputs.  Empty when no spec
+        steps ran.
         """
         if self._total_spec_steps == 0:
             return []

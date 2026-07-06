@@ -45,6 +45,10 @@ class vLLMBackend(KVBackend):
         self._block_hasher = get_request_block_hasher(
             self._hash_block_size, sha256
         )
+        # Diagnostic from the last failed allocate_slots (None when last call
+        # succeeded or when the demand could not be computed).  Used only for a
+        # clearer OOM error message in the scheduler.
+        self.last_alloc_required_blocks: int | None = None
 
     # ---- KVBackend interface ----
 
@@ -91,12 +95,41 @@ class vLLMBackend(KVBackend):
         new_computed_blocks: "KVCacheBlocks | None" = None,
     ) -> "KVCacheBlocks | None":
         assert sim_req._vllm_request is not None
-        return self._manager.allocate_slots(
+        result = self._manager.allocate_slots(
             request=sim_req._vllm_request,
             num_new_tokens=num_new_tokens,
             num_new_computed_tokens=num_new_computed_tokens,
             new_computed_blocks=new_computed_blocks,
         )
+        if result is None:
+            # Capture *why* it failed for a clearer OOM message: the shared
+            # block pool is divided across KV groups with different block
+            # sizes, so "N free blocks" does NOT mean "N scheduler blocks".
+            # num_blocks_to_allocate is the real group-block demand (summed
+            # over all groups); free is the shared-pool free count.
+            try:
+                vr = sim_req._vllm_request
+                total_computed = vr.num_computed_tokens + num_new_computed_tokens
+                num_tokens_main = total_computed + num_new_tokens
+                self.last_alloc_required_blocks = (
+                    self._manager.coordinator.get_num_blocks_to_allocate(
+                        request_id=vr.request_id,
+                        num_tokens=num_tokens_main,
+                        new_computed_blocks=(
+                            new_computed_blocks.blocks
+                            if new_computed_blocks is not None
+                            else self._manager.empty_kv_cache_blocks.blocks
+                        ),
+                        num_encoder_tokens=0,
+                        total_computed_tokens=total_computed,
+                        num_tokens_main_model=num_tokens_main,
+                    )
+                )
+            except Exception:
+                self.last_alloc_required_blocks = None
+        else:
+            self.last_alloc_required_blocks = None
+        return result
 
     def set_spec_tokens(
         self, sim_req: "vLLMSimRequest", tokens: list[int]

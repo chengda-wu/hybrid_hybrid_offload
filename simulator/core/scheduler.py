@@ -67,6 +67,12 @@ class SimulatorScheduler:
         total_loaded = 0
         total_computed = 0
         total_accepted = 0
+        total_generated = 0  # output tokens actually produced this step
+                              # (bonus + accepted spec); for throughput, this
+                              # is the faithful numerator — it counts only
+                              # tokens generated in THIS step, so summing over
+                              # post-warmup steps stays self-consistent with the
+                              # post-warmup busy-time denominator.
         first_token_this_step: list[SimRequestState] = []
         for req in list(self._running.values()):
             if req.is_finished:
@@ -74,15 +80,16 @@ class SimulatorScheduler:
 
             had_output = req.output_length > 0
             if req.status == RequestStatus.PRE_FILL:
-                loaded, computed, accepted = self._handle_prefill(req)
+                loaded, computed, accepted, generated = self._handle_prefill(req)
             elif req.status == RequestStatus.DECODING:
-                loaded, computed, accepted = self._handle_decode(req)
+                loaded, computed, accepted, generated = self._handle_decode(req)
             else:
-                loaded = computed = accepted = 0
+                loaded = computed = accepted = generated = 0
 
             total_loaded += loaded
             total_computed += computed
             total_accepted += accepted
+            total_generated += generated
 
             # A request produces its first output token in the decode step
             # where output_length goes 0 → >0.  Stamp TTFT after step_latency
@@ -114,6 +121,7 @@ class SimulatorScheduler:
                 loaded_tokens=total_loaded,
                 computed_tokens=total_computed,
                 accepted_tokens=total_accepted,
+                generated_tokens=total_generated,
             )
 
         # 5. Free finished
@@ -133,10 +141,11 @@ class SimulatorScheduler:
     # Per-request handlers
     # ------------------------------------------------------------------
 
-    def _handle_prefill(self, req: SimRequestState) -> tuple[int, int, int]:
+    def _handle_prefill(self, req: SimRequestState) -> tuple[int, int, int, int]:
         """Full prefill in one step (no chunked prefill).
 
-        Returns (loaded_tokens, computed_tokens, accepted_tokens) for this step.
+        Returns (loaded_tokens, computed_tokens, accepted_tokens, generated_tokens)
+        for this step.  Prefill produces no output tokens, so generated=0.
         """
         backend = self._backend
 
@@ -161,11 +170,27 @@ class SimulatorScheduler:
             # Whole-prompt prefill must fit in one step (no chunked prefill by
             # design). If it never fits, retrying forever would hang the loop.
             # Fail loudly so the user increases num_kv_cache_blocks.
+            #
+            # NOTE on block counts: the backend's "free blocks" is NOT a
+            # token/scheduler-block count.  vLLM packs 6 KV groups (block sizes
+            # 4..256) into one shared pool; a single scheduler block consumes
+            # one block from *each* resident group, so the demand in pool
+            # blocks far exceeds num_new_tokens / scheduler_block_size.  When
+            # the backend can report the real demand, include it.
+            required = getattr(self._backend, "last_alloc_required_blocks", None)
+            demand = (
+                f", needs {required} pool blocks across all KV groups"
+                if required is not None
+                else ""
+            )
             raise RuntimeError(
                 f"Cannot allocate KV cache for prefill of request {req.request_id}: "
                 f"needs {num_new_tokens} new tokens "
                 f"(prompt={req.num_tokens}, cache_hit={num_computed}) "
-                f"with only {self._backend.num_free_blocks} free blocks. "
+                f"with only {self._backend.num_free_blocks} free pool blocks"
+                f"{demand}. "
+                f"Note: pool blocks are shared across all KV groups, so demand "
+                f"is much larger than tokens / scheduler_block_size. "
                 f"Increase --num-kv-blocks or reduce prompt length."
             )
 
@@ -184,12 +209,12 @@ class SimulatorScheduler:
                 f"cache_hit={num_computed}, new_tokens={num_new_tokens}"
             )
 
-        return loaded, num_new_tokens, 0
+        return loaded, num_new_tokens, 0, 0
 
-    def _handle_decode(self, req: SimRequestState) -> tuple[int, int, int]:
+    def _handle_decode(self, req: SimRequestState) -> tuple[int, int, int, int]:
         """One decode step.
 
-        Returns (loaded_tokens, computed_tokens, accepted_tokens).
+        Returns (loaded_tokens, computed_tokens, accepted_tokens, generated_tokens).
         """
         # 1. Generate draft tokens from spec engine
         drafts = self._spec_engine.generate_draft_tokens(req)
@@ -280,7 +305,7 @@ class SimulatorScheduler:
                 f"output={req.output_length}"
             )
 
-        return loaded, computed, num_accepted
+        return loaded, computed, num_accepted, len(accepted_tokens)
 
     # ------------------------------------------------------------------
     # Queue management
