@@ -81,9 +81,19 @@ class SimulationEngine:
 
     def run(self) -> SimulationReport:
         """Run the full simulation and return the report."""
+        # Load data first so the summary can report the real request count
+        # (synthetic uses num_requests; real datasets load whatever's in the
+        # JSONL — printing synthetic.num_requests would lie for real datasets).
+        loader = DatasetLoader(
+            self._config.dataset, seed=self._config.random_seed,
+            arrival_config=self._config.arrival,
+        )
+        request_datas = loader.load()
+
         # Print config summary
         kv_size_bytes = self._backend.total_bytes
         kv_size_gb = kv_size_bytes / (1024**3)
+        src = self._config.dataset.source
         print(
             f"Backend: {self._backend.name} | "
             f"Model: {self._model_arch.model_type} ({self._model_arch.num_layers} layers) | "
@@ -91,17 +101,10 @@ class SimulationEngine:
             f"{self._main_block_size} tokens)"
         )
         print(
-            f"Requests: {self._config.dataset.synthetic.num_requests} | "
+            f"Requests: {len(request_datas)} ({src}) | "
             f"Spec tokens: K={self._config.speculative.num_spec_tokens} | "
             f"Seed: {self._config.random_seed}"
         )
-
-        # Load data
-        loader = DatasetLoader(
-            self._config.dataset, seed=self._config.random_seed,
-            arrival_config=self._config.arrival,
-        )
-        request_datas = loader.load()
 
         # Build SimRequestStates
         requests = []

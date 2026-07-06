@@ -37,6 +37,7 @@ python -m simulator.run [OPTIONS]
 | `--max-model-len` | `8192` | 模型最大上下文长度（token 数） |
 | `--kv-block-size` | `16` | KV cache 块大小（每个 block 包含的 token 数）。vLLM 按此粒度分配/匹配 |
 | `--num-kv-blocks` | `4096` | KV cache 块池总数。决定总可用缓存空间：`blocks × block_size × per_token_bytes` |
+| `--fp4-indexer` | off | 开关：DeepSeek V4 indexer 用 fp4（SGLang 下 68 B/token）而非 fp8（132 B/token）。vLLM 的 indexer 分配恒为 132 B/token（fp4 仅半数 slot 被用，分配不变），故此开关只影响 SGLang 的 `total_bytes`。也可在 JSON config 里设 `use_fp4_indexer: true` |
 
 #### 数据集
 
@@ -97,6 +98,23 @@ python -m simulator.run [OPTIONS]
 | `--output` / `-o` | — | 输出 JSON 报告路径。省略则打印到 stdout |
 | `--verbose` / `-v` | — | 打印每步调度日志（请求状态变化、prefill/decode 详情） |
 | `--config` | — | JSON 配置文件路径，可替代上述所有 CLI 参数。示例 6 展示了完整的配置文件格式 |
+
+#### 仅 JSON config 可用的参数
+
+以下参数无 CLI flag，只能通过 `--config` JSON 文件设置（见示例 6 的格式）：
+
+| 字段（JSON 路径） | 默认值 | 说明 |
+|------|--------|------|
+| `warmup_steps` | `10` | 仿真开头跳过的不计入指标的步数（cache 不清空，仅排除 metrics 记录）。throughput 分子/分母与 `cache_hit_rate` 等都基于 post-warmup 步 |
+| `dataset.source` | `synthetic` | `synthetic` 或 `real`。`real` 时需设 `dataset.real_dataset_path` |
+| `dataset.real_dataset_path` | — | 真实数据集 JSONL 路径。每行一个 JSON：`{"prompt_token_ids": [...], "completion_token_ids": [...]}`（也接受 `ground_truth_output` 键）。`completion_token_ids` 作为 ground truth 用于接受率采样 |
+| `arrival.arrival_pattern` | `poisson` | `burst`（全部 t=0 到达）/ `poisson`（指数间隔，均值 `1000/poisson_rate` ms）/ `staggered`（每 `stagger_delay_steps` 步一个，每步 10ms） |
+| `arrival.poisson_rate` | `1.0` | Poisson 到达率（请求/秒），仅 `poisson` 模式 |
+| `arrival.stagger_delay_steps` | `5` | staggered 模式下相邻请求间隔步数 |
+| `dataset.synthetic.prompt_length_dist` | `fixed` | `fixed`/`uniform`/`normal`（CLI 的 `--prompt-length` 只设 `fixed`） |
+| `dataset.synthetic.output_length_dist` | `fixed` | `fixed`/`uniform`（CLI 的 `--output-length` 只设 `fixed`） |
+
+> **CLI 与 config 关系**：CLI 参数只覆盖合成数据集 + 基础调度场景。真实数据集、到达模式、warmup、分布参数等需用 JSON config。`--config` 与 CLI 参数不混用（给了 `--config` 则忽略其它 CLI flag，除 `--fp4-indexer` 外）。
 
 ### 输出指标
 
@@ -316,11 +334,46 @@ EOF
 python -m simulator.run --config batch_experiment.json -o result.json
 ```
 
+**示例 7：真实数据集 + 到达模式 + warmup**
+
+用真实 trace（JSONL）跑仿真，配合 Poisson 到达与 warmup：
+
+```bash
+# 1. 准备数据集（每行一个 JSON）
+cat > trace.jsonl << 'EOF'
+{"prompt_token_ids": [1,2,3,...], "completion_token_ids": [10,11,12,...]}
+{"prompt_token_ids": [4,5,6,...], "completion_token_ids": [20,21,22,...]}
+EOF
+
+# 2. 配置：真实数据集 + Poisson 到达 + warmup 20 步 + K=4 spec
+cat > real_trace.json << 'EOF'
+{
+  "backend": "vllm",
+  "warmup_steps": 20,
+  "speculative": {
+    "num_spec_tokens": 4,
+    "accept_mode": "per_position",
+    "acceptance_rates": [0.9, 0.8, 0.7, 0.6]
+  },
+  "dataset": {
+    "source": "real",
+    "real_dataset_path": "trace.jsonl"
+  },
+  "arrival": {
+    "arrival_pattern": "poisson",
+    "poisson_rate": 2.0
+  }
+}
+EOF
+
+python -m simulator.run --config real_trace.json -o real_result.json
+```
+
 ### 已知简化
 
-- **测试覆盖**：27 个 unittest 覆盖 acceptance / GPU perf / SGLang allocate / scheduler E2E（`simulator/tests/`，含 `integration/test_scheduler_e2e.py` 跑两后端 spec-on/off 全流程 + prefill OOM 回归，带 wall-clock timeout 防 hang）。
+- **测试覆盖**：31 个 unittest 覆盖 acceptance / GPU perf / SGLang allocate / scheduler E2E（`simulator/tests/`，含 `integration/test_scheduler_e2e.py` 跑两后端 spec-on/off 全流程，断言吞吐/逐位置接受率/壁钟时间字段，带 wall-clock timeout 防 hang）。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
-- **无抢占**：prefill 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。
+- **无抢占**：**prefill** 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。**decode** 分配失败时跳过该步（不推进该请求，不抛错）——SWA 滑窗回收让 decode 占用基本稳定，此路径极难触发，但若并发极高且 cache 极小，理论上一致跳过会让请求卡死（真实引擎会 preempt 而非跳过）。OOM 报错信息按后端区分：vLLM 报"跨组 pool block 真实需求"，SGLang 报"哪个池(sw a/c4/c128)超容+used/need/cap"。
 - **FP4 indexer**：通过 `--fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
@@ -335,22 +388,24 @@ Step N:
   1. 从等待队列注入到达时间的请求
   2. 对每个活跃请求:
      Prefill:  get_computed_blocks → allocate_slots(完整 prompt)
-     Decode:   生成 draft tokens [bonus, draft_0, ..., draft_{K-1}]
+     Decode:   bonus = ground_truth[output_pos]        ← scheduler 直接取，恒接受
+               drafts = ground_truth[output_pos+1 .. +K]  ← K 个 spec draft
                allocate_slots(1+K)
                num_computed_tokens += (1+K)           ← _update_after_schedule
-               接受判定: draft 匹配 ground truth + 逐位置采样
-               num_computed_tokens -= rejected         ← update_from_output
+               接受判定: 逐位置条件率采样 cond[i]=marginal[i]/marginal[i-1]
+               num_computed_tokens -= (rejected+beyond) ← update_from_output
                净推进: bonus(1) + accepted
   3. GPU 延迟模拟: predict(total_loaded, total_computed)
-  4. 记录 per-step 指标
+  4. 记录 per-step 指标（跳过前 warmup_steps 步）
   5. 释放完成的请求
 ```
 
-投机判定采用双条件：draft token 必须**同时**满足：
-1. 与 ground truth output token 匹配
-2. 通过该位置的 accept_rate 随机采样
+投机判定：draft token **就是 ground truth**（`SpeculativeDecodeEngine` 直接取真实后续 token，无独立 draft 质量模型——`draft_accuracy` 参数已删除，因为逐位置接受率已含 draft 正确性 + target 验证）。接受与否仅由逐位置条件率采样决定：
 
-首个失败的 draft 立即断链，后续全部 reject。
+- 输入 `acceptance_rates` 是**边际率**（口径A：`P(draft_i 被接受)`，分母=所有 spec-decode step），须非递增。
+- 内部转成条件率 `cond[i] = marginal[i] / marginal[i-1]`（`marginal[-1]=1`）按链式断裂采样，使实测边际率复现输入。
+- 首个采样失败的 draft 立即断链，后续全部 reject；越界 draft（越过 ground truth 末尾）不算 reject，但仍回滚其 slot。
+- 接受率采样用**每请求独立 RNG**（`(seed, request_id)` 派生），请求间互不影响、与调度顺序无关；固定 seed 仍可复现同一请求集。
 
 ### 目录结构
 
