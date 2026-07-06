@@ -54,7 +54,7 @@ python -m simulator.run [OPTIONS]
 | `--num-spec-tokens` | `2` | 每步 draft token 数量 **K**。设为 `0` 关闭投机解码 |
 | `--accept-mode` | `per_position` | `fixed`：所有位置使用同一接受率；`per_position`：每个位置使用 `--acceptance-rates` 中对应索引的值 |
 | `--acceptance-rate` | `0.85` | 固定接受率，仅 `--accept-mode fixed` 时生效 |
-| `--acceptance-rates` | — | 逐位置**端到端**接受率（真实 speculator 上实测），空格分隔 **K 个浮点数**。如 `0.9 0.7 0.5 0.3` 表示 draft token 1 接受率 0.9、draft token 2 接受率 0.7……以此类推。该值已包含 draft 正确性 + target 验证两个环节，无需单独指定 draft 质量。仅 `--accept-mode per_position` 时生效。**长度必须 ≥ K** |
+| `--acceptance-rates` | — | 逐位置**边际**接受率（真实 speculator 上实测的 `P(draft_i 被接受)`），空格分隔 **K 个浮点数**，须**非递增**。如 `0.9 0.7 0.5 0.3`。该值已含 draft 正确性 + target 验证，无需另指定 draft 质量。仿真器内部按链式断裂语义转成条件率 `cond[i]=rate[i]/rate[i-1]` 采样，使实测边际率复现输入；报表 `per_position_acceptance_rates` 可核对。仅 `--accept-mode per_position` 时生效，**长度必须 ≥ K** |
 
 #### GPU 性能模型
 
@@ -114,7 +114,8 @@ python -m simulator.run [OPTIONS]
   "max_waiting_queue_length": 19,          // 最大等待队列长度
   "cache_hit_rate": 0.475,                 // prefix cache 命中率
   "avg_cache_usage": 0.092,                // 平均 cache 利用率
-  "avg_acceptance_rate": 0.433,            // 投机解码平均接受率
+  "avg_acceptance_rate": 0.433,            // 投机解码平均接受率（聚合值）
+  "per_position_acceptance_rates": [0.9, 0.8, 0.7, 0.6],  // 逐位置边际接受率（应复现输入）
   "total_requests": 20,                    // 请求总数
   "total_tokens_generated": 1280,          // 生成的总 token 数
   "total_sim_time_ms": 309.0,              // 仿真总耗时

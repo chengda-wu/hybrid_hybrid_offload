@@ -131,6 +131,7 @@ class SimulationEngine:
             recorder=self._recorder,
             backend=self._backend.name,
             kv_cache_size_gb=kv_size_gb,
+            acceptance_model=self._acceptance,
         )
 
     def _build_backend(self) -> KVBackend:

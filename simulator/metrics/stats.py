@@ -37,6 +37,9 @@ class SimulationReport:
     avg_acceptance_rate: float | None   # None when no spec tokens were ever
                                         # evaluated (spec off / no decode) —
                                         # distinct from 0.0 (spec on, all rejected)
+    per_position_acceptance_rates: list[float]  # marginal rate per draft position
+                                                # (accepted / spec-decode steps);
+                                                # should reproduce the input rates
 
     # ---- Throughput ----
     total_requests: int
@@ -70,6 +73,7 @@ class StatisticsComputer:
         recorder: MetricsRecorder,
         backend: str = "",
         kv_cache_size_gb: float = 0.0,
+        acceptance_model=None,
     ) -> SimulationReport:
         steps = recorder.steps
         reqs = recorder.requests
@@ -131,6 +135,11 @@ class StatisticsComputer:
             if total_busy_time > 0 else 0.0
         )
 
+        per_pos_rates = (
+            list(acceptance_model.per_position_acceptance_rates)
+            if acceptance_model is not None else []
+        )
+
         return SimulationReport(
             avg_loaded_tokens_per_step=round(avg_loaded, 2),
             avg_computed_tokens_per_step=round(avg_computed, 2),
@@ -147,6 +156,7 @@ class StatisticsComputer:
             avg_acceptance_rate=(
                 round(avg_accept_rate, 4) if avg_accept_rate is not None else None
             ),
+            per_position_acceptance_rates=[round(r, 4) for r in per_pos_rates],
             total_requests=len(reqs),
             total_tokens_generated=total_generated,
             total_sim_time_ms=round(total_sim_time, 2),
