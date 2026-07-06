@@ -119,6 +119,16 @@ class SGLangBackend(KVBackend):
         self._swa_per_tok = arch.num_layers
         self._c4_per_tok = (sum(1 for cr in (arch.compress_ratios or []) if cr == 4) * 2)
         self._c128_per_tok = sum(1 for cr in (arch.compress_ratios or []) if cr == 128)
+        self._pool_names = ["swa", "c4", "c128"]
+        self._pool_per_tok = [
+            self._swa_per_tok, self._c4_per_tok, self._c128_per_tok,
+        ]
+
+        # Diagnostic from the last failed allocate_slots (None when last call
+        # succeeded).  SGLang fails on per-pool capacity, not total-pool free,
+        # so this records which pool(s) were over budget for a clearer OOM
+        # message.  Used only by the scheduler's error path.
+        self.last_alloc_failure: dict | None = None
 
         from sglang.srt.mem_cache.radix_cache import RadixCache
 
@@ -192,17 +202,34 @@ class SGLangBackend(KVBackend):
         swa_need = to_alloc * self._swa_per_tok
         c4_need = to_alloc * self._c4_per_tok
         c128_need = to_alloc * self._c128_per_tok
+        needs = [swa_need, c4_need, c128_need]
+
+        def _over_budget() -> list[int]:
+            return [
+                i for i in range(3)
+                if self._pool_used[i] + needs[i] > self._pool_caps[i]
+            ]
 
         # If any pool is over budget, trigger RadixCache eviction.
         # evict() expects token count, not slot count.
-        if (self._pool_used[0] + swa_need > self._pool_caps[0] or
-                self._pool_used[1] + c4_need > self._pool_caps[1] or
-                self._pool_used[2] + c128_need > self._pool_caps[2]):
+        if _over_budget():
             self._cache.evict(EvictParams(num_tokens=to_alloc))
             # Re-check: eviction may have freed enough
-            if (self._pool_used[0] + swa_need > self._pool_caps[0] or
-                    self._pool_used[1] + c4_need > self._pool_caps[1] or
-                    self._pool_used[2] + c128_need > self._pool_caps[2]):
+            over = _over_budget()
+            if over:
+                self.last_alloc_failure = {
+                    "over_budget_pools": [
+                        {
+                            "name": self._pool_names[i],
+                            "used_slots": self._pool_used[i],
+                            "need_slots": needs[i],
+                            "cap_slots": self._pool_caps[i],
+                            "per_token_slots": self._pool_per_tok[i],
+                        }
+                        for i in over
+                    ],
+                    "alloc_tokens": to_alloc,
+                }
                 return None
 
         # RadixCache token-level allocation (one index per token).
@@ -210,6 +237,11 @@ class SGLangBackend(KVBackend):
         # the flat pool has ample capacity (15.6M slots).
         new_indices = self._mock_allocator.allocate(to_alloc)
         if new_indices is None:
+            self.last_alloc_failure = {
+                "flat_pool_oom": True,
+                "alloc_tokens": to_alloc,
+                "available_tokens": self._mock_allocator.available_size(),
+            }
             return None
 
         # Track per-pool slot usage
@@ -218,6 +250,7 @@ class SGLangBackend(KVBackend):
         self._pool_used[2] += c128_need
 
         sim_req._allocated_indices.append(new_indices)
+        self.last_alloc_failure = None
         return new_indices
 
     def _deduct_pool_used(self, num_tokens: int) -> None:

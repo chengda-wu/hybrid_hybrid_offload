@@ -35,15 +35,22 @@ class AcceptanceModel:
         model = AcceptanceModel(config, seed=42)
         num_accepted, num_rejected, num_beyond = model.evaluate(request, draft_tokens)
 
-    A single RNG is shared across all requests and consumed in scheduling
-    order, so results are reproducible for a fixed schedule but
-    inter-request-coupled and order-dependent.
+    Each request gets its own RNG derived from ``request_id`` and the global
+    ``seed``, so a request's acceptance draws are independent of scheduling
+    order and of other requests (adding/removing/reordering requests does not
+    shift a given request's results).  A fixed seed still reproduces the same
+    request set.
     """
 
     def __init__(self, config: SpeculativeDecodeConfig, seed: int = 42):
         self._config = config
-        self._rng = random.Random(seed)
+        self._seed = seed
         self._K = config.num_spec_tokens
+        # Per-request RNGs (derived from request_id + seed) so each request's
+        # acceptance draws are independent of scheduling order and of other
+        # requests.  A fixed global seed still makes a given request set fully
+        # reproducible.  Cached lazily on first use.
+        self._req_rngs: dict[str, random.Random] = {}
 
         # Per-position accumulators for the report (marginal rates, caliber A:
         # denominator = all spec-decode steps).  A single global step count is
@@ -168,9 +175,11 @@ class AcceptanceModel:
                 break
 
             # Conditional-rate sampling (derived from the marginal input).
-            # First miss breaks the chain.
+            # First miss breaks the chain.  Uses a per-request RNG so this
+            # request's draws are independent of scheduling order and of other
+            # requests (a fixed seed still reproduces the same request set).
             accept_rate = self._get_cond_rate(i)
-            if self._rng.random() >= accept_rate:
+            if self._req_rng(req.request_id).random() >= accept_rate:
                 break
 
             num_accepted += 1
@@ -205,3 +214,23 @@ class AcceptanceModel:
         if self._cond_rates:
             return self._cond_rates[min(position, len(self._cond_rates) - 1)]
         return 0.5
+
+    def _req_rng(self, request_id: str) -> random.Random:
+        """Return a stable per-request RNG (cached).
+
+        Derived deterministically from ``request_id`` and the global ``seed```,
+        so the same request set is reproducible regardless of scheduling order,
+        and one request's draws do not shift when another is added/removed.
+        """
+        rng = self._req_rngs.get(request_id)
+        if rng is None:
+            import hashlib
+
+            digest = hashlib.sha256(
+                f"{self._seed}:{request_id}".encode()
+            ).digest()
+            # Take 8 bytes for a 64-bit seed (random.Random accepts any int).
+            req_seed = int.from_bytes(digest[:8], "little")
+            rng = random.Random(req_seed)
+            self._req_rngs[request_id] = rng
+        return rng

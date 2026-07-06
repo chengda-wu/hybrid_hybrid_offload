@@ -170,28 +170,8 @@ class SimulatorScheduler:
             # Whole-prompt prefill must fit in one step (no chunked prefill by
             # design). If it never fits, retrying forever would hang the loop.
             # Fail loudly so the user increases num_kv_cache_blocks.
-            #
-            # NOTE on block counts: the backend's "free blocks" is NOT a
-            # token/scheduler-block count.  vLLM packs 6 KV groups (block sizes
-            # 4..256) into one shared pool; a single scheduler block consumes
-            # one block from *each* resident group, so the demand in pool
-            # blocks far exceeds num_new_tokens / scheduler_block_size.  When
-            # the backend can report the real demand, include it.
-            required = getattr(self._backend, "last_alloc_required_blocks", None)
-            demand = (
-                f", needs {required} pool blocks across all KV groups"
-                if required is not None
-                else ""
-            )
             raise RuntimeError(
-                f"Cannot allocate KV cache for prefill of request {req.request_id}: "
-                f"needs {num_new_tokens} new tokens "
-                f"(prompt={req.num_tokens}, cache_hit={num_computed}) "
-                f"with only {self._backend.num_free_blocks} free pool blocks"
-                f"{demand}. "
-                f"Note: pool blocks are shared across all KV groups, so demand "
-                f"is much larger than tokens / scheduler_block_size. "
-                f"Increase --num-kv-blocks or reduce prompt length."
+                self._prefill_oom_message(req, num_new_tokens, num_computed)
             )
 
         req.allocated_blocks = allocated
@@ -210,6 +190,58 @@ class SimulatorScheduler:
             )
 
         return loaded, num_new_tokens, 0, 0
+
+    def _prefill_oom_message(
+        self, req: SimRequestState, num_new_tokens: int, num_computed: int
+    ) -> str:
+        """Build a backend-specific OOM message for a failed prefill alloc.
+
+        vLLM packs 6 KV groups (block sizes 4..256) into one shared pool, so
+        "free blocks" is a pool-block count and demand far exceeds
+        tokens / scheduler_block_size — we report the real cross-group demand.
+        SGLang fails on per-pool capacity (swa/c4/c128), not total free, so we
+        report which pool(s) are over budget.
+        """
+        free = self._backend.num_free_blocks
+        hint = "Increase --num-kv-blocks or reduce prompt length."
+
+        # vLLM: shared pool, real demand in pool blocks across all groups.
+        required = getattr(self._backend, "last_alloc_required_blocks", None)
+        if required is not None:
+            return (
+                f"Cannot allocate KV cache for prefill of request "
+                f"{req.request_id}: needs {num_new_tokens} new tokens "
+                f"(prompt={req.num_tokens}, cache_hit={num_computed}) "
+                f"with only {free} free pool blocks, needs {required} pool "
+                f"blocks across all KV groups.  Note: pool blocks are shared "
+                f"across all KV groups, so demand is much larger than tokens / "
+                f"scheduler_block_size.  {hint}"
+            )
+
+        # SGLang: per-pool capacity.  Show which pool(s) are over budget.
+        failure = getattr(self._backend, "last_alloc_failure", None)
+        if isinstance(failure, dict) and failure.get("over_budget_pools"):
+            pool_lines = "; ".join(
+                f"{p['name']}: used {p['used_slots']} + need {p['need_slots']} "
+                f"> cap {p['cap_slots']} slots ({p['per_token_slots']} slots/token)"
+                for p in failure["over_budget_pools"]
+            )
+            return (
+                f"Cannot allocate KV cache for prefill of request "
+                f"{req.request_id}: needs {num_new_tokens} new tokens "
+                f"(prompt={req.num_tokens}, cache_hit={num_computed}).  "
+                f"SGLang KV pool(s) over budget — {pool_lines}.  "
+                f"Note: SGLang fails on per-pool capacity (swa/c4/c128), "
+                f"not total free ({free} token slots free).  {hint}"
+            )
+
+        # Fallback (no diagnostic available).
+        return (
+            f"Cannot allocate KV cache for prefill of request {req.request_id}: "
+            f"needs {num_new_tokens} new tokens "
+            f"(prompt={req.num_tokens}, cache_hit={num_computed}) "
+            f"with only {free} free blocks.  {hint}"
+        )
 
     def _handle_decode(self, req: SimRequestState) -> tuple[int, int, int, int]:
         """One decode step.

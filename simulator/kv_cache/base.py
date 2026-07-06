@@ -70,14 +70,25 @@ class KVBackend(ABC):
         """Free rejected spec token slots.  vLLM: no-op (position rollback).
         SGLang: explicit free from mock pool.
 
-        Note for vLLM: real vLLM's ``update_from_output`` frees the blocks of
-        rejected draft tokens (it rolls back ``num_computed_tokens`` and the
-        block pool releases the trailing blocks).  This simulation approximates
-        that as a no-op — rejected slots stay allocated until the request is
-        ``free()``-ed.  Under frequent speculation rejection this overestimates
-        vLLM cache ``usage`` and may trigger OOM earlier than real vLLM would.
-        Acceptable for latency-focused experiments; revisit if modeling vLLM
-        eviction/OOM behavior precisely.
+        vLLM no-op is *accurate*, not an approximation: real vLLM's
+        ``update_from_output`` only rolls back ``num_computed_tokens`` by
+        ``num_rejected`` — it does NOT return the rejected drafts' blocks to
+        the free pool.  Those blocks stay in ``req_to_blocks`` and are reused
+        on the next decode step (because the rolled-back ``num_computed`` means
+        fewer blocks are needed, so ``allocate_new_blocks`` allocates nothing
+        and the existing trailing blocks are overwritten in place).  Hence
+        ``get_num_free_blocks`` does not rise after a rejection, matching this
+        no-op.  The scheduler still calls ``subtract_rejected_tokens`` to mirror
+        the ``num_computed_tokens`` rollback.
+
+        SGLang differs: its ``req_to_token_pool`` rows are append-only with no
+        in-place reuse, so rejected tail slots must be explicitly freed (else
+        they leak until ``free()``).
+
+        A separate, spec-independent source of cache-usage inaccuracy is that
+        SWA sliding-window blocks outside the window are not reclaimed here
+        (real vLLM reclaims them via ``remove_skipped_blocks``); this affects
+        long-decode SWA occupancy regardless of speculation.
         """
         pass
 

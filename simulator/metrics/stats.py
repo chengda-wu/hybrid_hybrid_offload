@@ -44,13 +44,13 @@ class SimulationReport:
     # ---- Throughput ----
     total_requests: int
     total_tokens_generated: int
-    total_sim_time_ms: float        # Wall-clock sim_time at the last recorded
-                                    # (post-warmup) step.  This value accumulates
-                                    # from step 1, so it INCLUDES warmup duration
-                                    # and idle fast-forward gaps.  It is NOT the
-                                    # throughput denominator — tokens_per_second
-                                    # divides total_tokens by GPU-busy time
-                                    # (sum of step_latency over post-warmup steps).
+    wall_clock_sim_time_ms: float   # Wall-clock sim_time at the last recorded
+                                    # (post-warmup) step.  Accumulates from step 1,
+                                    # so it INCLUDES warmup duration and idle
+                                    # fast-forward gaps.  NOT the throughput
+                                    # denominator — tokens_per_second divides
+                                    # post-warmup generated tokens by post-warmup
+                                    # GPU-busy time (sum of step_latency).
     tokens_per_second: float
 
     # ---- Config ----
@@ -135,7 +135,7 @@ class StatisticsComputer:
         #                   fast-forward gaps).
         total_generated_throughput = sum(s.total_generated_tokens for s in steps)
         total_busy_time = sum(s.step_latency_ms for s in steps)
-        total_sim_time = max(s.sim_time_ms for s in steps) if steps else 0.0
+        wall_clock_sim_time = max(s.sim_time_ms for s in steps) if steps else 0.0
         tokens_per_sec = (
             1000.0 * total_generated_throughput / total_busy_time
             if total_busy_time > 0 else 0.0
@@ -170,7 +170,7 @@ class StatisticsComputer:
             per_position_acceptance_rates=[round(r, 4) for r in per_pos_rates],
             total_requests=len(reqs),
             total_tokens_generated=total_generated,
-            total_sim_time_ms=round(total_sim_time, 2),
+            wall_clock_sim_time_ms=round(wall_clock_sim_time, 2),
             tokens_per_second=round(tokens_per_sec, 1),
             backend=backend,
             kv_cache_size_gb=round(kv_cache_size_gb, 2),

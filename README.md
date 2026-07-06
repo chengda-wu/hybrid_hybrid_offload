@@ -118,7 +118,7 @@ python -m simulator.run [OPTIONS]
   "per_position_acceptance_rates": [0.9, 0.8, 0.7, 0.6],  // 逐位置边际接受率（口径A：分母=所有 spec-decode step；长序列应复现输入，短序列因 EOS 附近 draft 越界后段会偏低）
   "total_requests": 20,                    // 请求总数
   "total_tokens_generated": 1280,          // post-warmup 完成请求的总输出 token 数（工作量计数）
-  "total_sim_time_ms": 309.0,              // 仿真总耗时（含 warmup 与空闲快进）
+  "wall_clock_sim_time_ms": 309.0,         // 仿真壁钟时间（含 warmup 与空闲快进，非吞吐分母）
   "tokens_per_second": 4142.3,             // 吞吐量 = post-warmup 各步实际生成 token 之和 / post-warmup 各步 step_latency 之和（GPU-busy time）
   "backend": "vllm"                        // 后端标识
 }
