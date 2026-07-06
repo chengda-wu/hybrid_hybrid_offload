@@ -177,14 +177,17 @@ class SimulatorScheduler:
         # 1. Generate draft tokens from spec engine
         drafts = self._spec_engine.generate_draft_tokens(req)
 
-        # Bonus is position 0 (always from ground truth for correctness)
+        # Bonus token (position 0) is the model's own autoregressive prediction —
+        # always produced, even when speculation is disabled (drafts == []).
+        # It is taken from ground truth for simulation correctness.
+        output_pos = len(req.output_token_ids)
         bonus_token: int | None = None
-        spec_tokens: list[int] = []
-        if drafts:
-            output_pos = len(req.output_token_ids)
-            if output_pos < len(req.ground_truth_output):
-                bonus_token = req.ground_truth_output[output_pos]
-            spec_tokens = drafts[1:]  # drafts[1:] are the K spec tokens
+        if output_pos < len(req.ground_truth_output):
+            bonus_token = req.ground_truth_output[output_pos]
+
+        # drafts[0] would be the bonus prediction; drafts[1:] are the K spec
+        # tokens. When speculation is off, drafts is empty → K=0.
+        spec_tokens = drafts[1:] if drafts else []
 
         K = len(spec_tokens)
 
