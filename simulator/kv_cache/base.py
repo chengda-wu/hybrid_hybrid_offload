@@ -88,11 +88,33 @@ class KVBackend(ABC):
         SWA sliding-window reclamation is NOT handled here, and does not need
         to be: real vLLM frees window-outside head blocks via
         ``remove_skipped_blocks``, which is called automatically at the start of
-        every ``allocate_slots`` (kv_cache_manager.py:400-404).  Because the
-        simulator calls ``allocate_slots`` each decode step, this reclamation
-        already runs — verified empirically (8000-token decode: avg_cache_usage
-        0.018 with reclamation vs 0.41 when ``remove_skipped_blocks`` is patched
-        to a no-op).  So SWA occupancy is modeled faithfully, not approximated.
+        every ``allocate_slots`` (kv_cache_manager.py:400-404).  So SWA
+        occupancy is modeled faithfully, not approximated.
+
+        Per-step call chain in real vLLM (and in this simulator, which
+        delegates ``allocate_slots`` straight through):
+            scheduler.schedule()                          # each step
+              └─ per running request:
+                   kv_cache_manager.allocate_slots()      # sched L527
+                     └─ coordinator.remove_skipped_blocks()  # kv_cache_manager L400
+                          └─ per KV group:
+                               SWA group (SlidingWindowManager):
+                                 get_num_skipped_tokens =
+                                   max(0, num_computed - sliding_window + 1)
+                                 → free head blocks outside the window, replace
+                                   with null_block in req_to_blocks
+                               other groups (Full/MLA/Compressor/Indexer):
+                                 get_num_skipped_tokens == 0 → no-op
+        So every decode step, every running request, triggers one SWA head-block
+        reclamation — matching real vLLM's timing and frequency.  (Two other
+        ``remove_skipped_blocks`` call sites exist — kv_cache_manager L487 and
+        scheduler L2342, the latter KV-connector-only at request finish — but
+        the per-step reclamation is entirely driven by the L400 site above.)
+
+        Verified empirically: 8000-token single-request decode gives
+        avg_cache_usage 0.018 with reclamation vs 0.41 when
+        ``remove_skipped_blocks`` is patched to a no-op (22x difference),
+        confirming it is active and materially correct.
         """
         pass
 
