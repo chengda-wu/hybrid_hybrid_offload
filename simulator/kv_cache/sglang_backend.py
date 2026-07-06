@@ -387,9 +387,14 @@ class SGLangBackend(KVBackend):
             _get_dsv4_compress_state_dtype_sizes,
         )
         c4_dt, c128_dt = _get_dsv4_compress_state_dtype_sizes()
-        c4_state_bytes = 2 * 2 * 512 * c4_dt    # last_dim=2048, overlap=True
-        c128_state_bytes = 2 * 1 * 512 * c128_dt # last_dim=1024, overlap=False
-        idx_state_bytes = 2 * 2 * 128 * c4_dt    # indexer uses c4 dtype
+        # last_dim = 2*(1+overlap)*head_dim (deepseek_v4_compress_state.py:125),
+        # head_dim = attn_head_dim = 512 (pool_configurator.py:585).  c4 overlap=True
+        # (ring>1), c128 overlap=False (ring>1).  Both use head_dim=512, NOT the
+        # state_dim in the per-group KVGroupInfo (2048/1024) — that is a different
+        # quantity.  Matches pool_configurator.py:589-596.
+        c4_state_bytes = 2 * 2 * 512 * c4_dt      # last_dim = 2*2*512 = 2048
+        c128_state_bytes = 2 * 1 * 512 * c128_dt  # last_dim = 2*1*512 = 1024
+        idx_state_bytes = 2 * 2 * 128 * c4_dt     # indexer uses c4 dtype
 
         # spec mode: draft worker scaling (pool_configurator.py:538-545),
         # applied consistently to both pool_caps (SGLangConfig) and total_bytes here.

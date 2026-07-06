@@ -169,7 +169,13 @@ KV 池页面有 576 字节对齐 padding（`DeepSeekV4SingleKVPool.create_buffer
 
 SGLang（spec 默认 K=2）24.35 GB vs vLLM 9.60 GB，差值 +14.75 GB（总盘相减）。主要来源：C128 compressor state spec ring(256) 远大于 vLLM packed。nonspec 下为 15.58 GB（差值 +5.98 GB）。vLLM packed 布局下各组容量不可简单加减（共享 bucket），差值以总盘为准。
 
-两端差异来自框架本身的架构选择，非模拟器偏差。
+两端差异来自框架本身的架构选择，非模拟器偏差。三个根因：
+
+1. **物理内存共享方式不同**：vLLM 把 6 组打包进单一物理 buffer（`_get_kv_cache_config_packed`），同 page_size 的组复用 slot——`c4_mla`(21L) 藏进 `swa`(43L) 的 slot、`c128_compressor`(20L) 藏进 `c4_compressor`(21L) 的 slot，物理上 0 额外字节。SGLang 每个 group 独立分配，无跨组共享。
+2. **compressor state sizing 模型不同**：vLLM 把 compressor 建模为共享 BlockPool 里的 sliding-window KV（且因根因 1 被藏进 c4_compressor 的 slot，几乎不占额外内存）；SGLang 把 compressor 建成独立 ring buffer（`swa_slots × ring × last_dim × dt × layers`），c128 单独就 8.0 GiB（nonspec）。这是 nonspec 差距（+5.98 GB）的主因。
+3. **spec 模式建模不对称**：SGLang spec 模式把 compressor ring 翻倍（c4 8→16、c128 128→256，`pool_configurator.py:514`），total 15.58→24.35 GB；vLLM 侧 `total_bytes` 与 `_build_vllm_specs` 不接收 `num_spec_tokens`，也不建模 eagle/MTP group，spec-on/off 都是 9.60 GB。
+
+> **可比性警告**：`num_kv_cache_blocks=4096` 在两端含义不同（vLLM 是共享 pool 的块数，每块含所有组的一个切片；SGLang 是 `full_tokens` 的来源，再按比例切给各池）。两端数字各自与其真实框架的物理分配逐字节吻合，但 **spec-on 的 14.75 GB 差距里有相当一部分是建模不对称造成的**（vLLM 侧未含 eagle/MTP 内存），不宜直接解读为"vLLM 比 SGLang 省 2.5×"。spec 模式公平对比需先给 vLLM 侧补 eagle/MTP 建模。
 
 ### 使用示例
 
