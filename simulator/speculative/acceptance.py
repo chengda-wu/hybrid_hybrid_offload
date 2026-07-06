@@ -23,6 +23,10 @@ class AcceptanceModel:
 
         model = AcceptanceModel(config, seed=42)
         num_accepted, num_rejected, num_beyond = model.evaluate(request, draft_tokens)
+
+    Note: a single RNG is shared across all requests and consumed in
+    scheduling order, so results are reproducible for a fixed schedule but
+    inter-request-coupled and order-dependent.
     """
 
     def __init__(self, config: SpeculativeDecodeConfig, seed: int = 42):
