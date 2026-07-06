@@ -235,11 +235,17 @@ class SimulatorScheduler:
         req.advance_computed_tokens(computed)
 
         # 6. Evaluate acceptance on spec tokens
-        num_accepted, num_rejected = self._acceptance.evaluate(req, spec_tokens)
+        num_accepted, num_rejected, num_beyond = self._acceptance.evaluate(
+            req, spec_tokens
+        )
 
-        # 7. update_from_output: subtract rejected, free rejected slots
-        req.subtract_rejected_tokens(num_rejected)
-        self._backend.free_rejected_slots(req.backend_req, num_rejected)
+        # 7. update_from_output: subtract rejected + beyond-ground-truth,
+        # free their slots.  Both classes of non-accepted draft must be rolled
+        # back (their slots were pre-allocated), even though only num_rejected
+        # counts toward acceptance-rate metrics.
+        num_to_rollback = num_rejected + num_beyond
+        req.subtract_rejected_tokens(num_to_rollback)
+        self._backend.free_rejected_slots(req.backend_req, num_to_rollback)
 
         # 8. Append accepted output tokens
         accepted_tokens: list[int] = []
@@ -256,6 +262,8 @@ class SimulatorScheduler:
         self._backend.sync_state(req.backend_req, req.output_token_ids)
 
         req.num_accepted_spec_tokens += num_accepted
+        # Only real rejections count toward the acceptance-rate metric;
+        # drafts truncated by end-of-ground-truth are not "rejected".
         req.num_rejected_spec_tokens += num_rejected
         req.num_decode_steps += 1
 

@@ -22,7 +22,7 @@ class AcceptanceModel:
     Usage::
 
         model = AcceptanceModel(config, seed=42)
-        num_accepted, num_rejected = model.evaluate(request, draft_tokens)
+        num_accepted, num_rejected, num_beyond = model.evaluate(request, draft_tokens)
     """
 
     def __init__(self, config: SpeculativeDecodeConfig, seed: int = 42):
@@ -39,7 +39,7 @@ class AcceptanceModel:
 
     def evaluate(
         self, req: SimRequestState, draft_tokens: list[int]
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         """Evaluate K draft tokens against ground truth and acceptance rates.
 
         Args:
@@ -47,23 +47,36 @@ class AcceptanceModel:
             draft_tokens: K draft tokens proposed for this decode step.
 
         Returns:
-            (num_accepted, num_rejected).  The bonus (position 0) is NOT
-            counted here — the caller handles the bonus separately.
+            (num_accepted, num_rejected, num_beyond_ground_truth).
+            - num_accepted: drafts that passed both conditions.
+            - num_rejected: drafts that failed a real condition (mismatch or
+              acceptance-rate miss).  These are the meaningful rejections for
+              acceptance-rate metrics.
+            - num_beyond_ground_truth: drafts that could not be evaluated
+              because they fall past the end of ground truth.  These are NOT
+              real rejections — the sequence simply ended — so they are
+              excluded from acceptance-rate metrics.  The caller still frees
+              their slots (num_accepted + num_rejected + num_beyond == K).
+
+            The bonus (position 0) is NOT counted here — the caller handles
+            the bonus separately.
         """
         K = len(draft_tokens)
         if K == 0:
-            return 0, 0
+            return 0, 0, 0
 
         output_position = len(req.output_token_ids)
         num_accepted = 0
+        beyond_ground_truth = 0
 
         for i in range(K):
             # +1 because the bonus token occupies output_position;
             # the first draft token is at output_position + 1
             abs_position = output_position + 1 + i
 
-            # Beyond ground truth — cannot verify
+            # Beyond ground truth — cannot verify.  These are not rejections.
             if abs_position >= len(req.ground_truth_output):
+                beyond_ground_truth = K - i
                 break
 
             ground_truth_token = req.ground_truth_output[abs_position]
@@ -79,8 +92,8 @@ class AcceptanceModel:
 
             num_accepted += 1
 
-        num_rejected = max(0, K - num_accepted)
-        return num_accepted, num_rejected
+        num_rejected = max(0, K - num_accepted - beyond_ground_truth)
+        return num_accepted, num_rejected, beyond_ground_truth
 
     # ------------------------------------------------------------------
     # Internal

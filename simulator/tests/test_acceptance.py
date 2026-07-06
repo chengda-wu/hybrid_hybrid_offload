@@ -60,34 +60,40 @@ class TestAcceptanceLogic(unittest.TestCase):
     def test_all_matching_drafts_accepted_with_high_rate(self):
         # output=[10], first draft after bonus checks ground_truth[2]=12
         self.req.output_token_ids = [10]
-        accepted, rejected = self.model.evaluate(self.req, [12, 13, 14])
-        self.assertEqual(accepted + rejected, 3)
+        accepted, rejected, beyond = self.model.evaluate(self.req, [12, 13, 14])
+        self.assertEqual(accepted + rejected + beyond, 3)
+        self.assertEqual(beyond, 0)
         self.assertGreaterEqual(accepted, 2)  # high rate => most accepted
 
     def test_first_mismatch_breaks_chain(self):
         self.req.output_token_ids = [10]
-        accepted, rejected = self.model.evaluate(self.req, [999, 12, 13])
+        accepted, rejected, beyond = self.model.evaluate(self.req, [999, 12, 13])
         self.assertEqual(accepted, 0, "first draft wrong, should reject all")
         self.assertEqual(rejected, 3)
+        self.assertEqual(beyond, 0)
 
     def test_mid_chain_mismatch(self):
         self.req.output_token_ids = [10]
-        accepted, rejected = self.model.evaluate(self.req, [12, 999, 13])
+        accepted, rejected, beyond = self.model.evaluate(self.req, [12, 999, 13])
         self.assertEqual(accepted, 1, "only first draft correct")
         self.assertEqual(rejected, 2)
+        self.assertEqual(beyond, 0)
 
     def test_bonus_offset_correct(self):
         """Draft[i] checks ground_truth[output_position + 1 + i]."""
         self.req.output_token_ids = [10, 11]
         # output_pos=2, first draft at 2+1+0=3 → ground_truth[3]=13
-        accepted, _ = self.model.evaluate(self.req, [13, 14, 15])
+        accepted, _, _ = self.model.evaluate(self.req, [13, 14, 15])
         self.assertGreaterEqual(accepted, 2)
 
     def test_beyond_ground_truth_breaks(self):
         self.req.output_token_ids = [10, 11, 12, 13, 14, 15, 16, 17, 18]
         # output_pos=9, first draft at 9+1+0=10 → ground_truth[10] out of range
-        accepted, _ = self.model.evaluate(self.req, [19, 99, 99])
+        accepted, rejected, beyond = self.model.evaluate(self.req, [19, 99, 99])
         self.assertEqual(accepted, 0, "only one token left at pos 10=out of range")
+        # All 3 fall beyond ground truth — not real rejections.
+        self.assertEqual(rejected, 0)
+        self.assertEqual(beyond, 3)
 
 
 if __name__ == "__main__":
