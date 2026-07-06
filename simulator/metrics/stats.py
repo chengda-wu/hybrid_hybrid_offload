@@ -34,7 +34,9 @@ class SimulationReport:
     avg_cache_usage: float
 
     # ---- Spec decode ----
-    avg_acceptance_rate: float
+    avg_acceptance_rate: float | None   # None when no spec tokens were ever
+                                        # evaluated (spec off / no decode) —
+                                        # distinct from 0.0 (spec on, all rejected)
 
     # ---- Throughput ----
     total_requests: int
@@ -107,11 +109,15 @@ class StatisticsComputer:
         # Cache usage
         avg_cache_usage = _mean([s.cache_usage for s in steps])
 
-        # Spec accept rate
+        # Spec accept rate.  None when no spec tokens were ever evaluated
+        # (spec disabled, or no decode steps ran) — distinguishes "spec off"
+        # from "spec on but 0% accepted".
         total_accept = sum(r.num_accepted_spec_tokens for r in reqs)
         total_reject = sum(r.num_rejected_spec_tokens for r in reqs)
         total_spec = total_accept + total_reject
-        avg_accept_rate = total_accept / total_spec if total_spec > 0 else 0.0
+        avg_accept_rate = (
+            total_accept / total_spec if total_spec > 0 else None
+        )
 
         # Throughput.  Denominator = sum of step latencies over the recorded
         # (post-warmup) steps — i.e. GPU-busy time, excluding warmup and idle
@@ -138,7 +144,9 @@ class StatisticsComputer:
             max_waiting_queue_length=max_queue,
             cache_hit_rate=round(cache_hit_rate, 4),
             avg_cache_usage=round(avg_cache_usage, 4),
-            avg_acceptance_rate=round(avg_accept_rate, 4),
+            avg_acceptance_rate=(
+                round(avg_accept_rate, 4) if avg_accept_rate is not None else None
+            ),
             total_requests=len(reqs),
             total_tokens_generated=total_generated,
             total_sim_time_ms=round(total_sim_time, 2),
