@@ -200,6 +200,7 @@ class SimulatorConfig:
             arrival=arrival,
             speculative=speculative,
             gpu_perf=gpu_perf,
+            use_fp4_indexer=data.get("use_fp4_indexer", False),
             kv_cache_block_size=data.get("kv_cache_block_size", 16),
             hash_block_size=data.get("hash_block_size", 16),
             max_model_len=data.get("max_model_len", 8192),

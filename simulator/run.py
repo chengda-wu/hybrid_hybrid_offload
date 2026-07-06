@@ -24,6 +24,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.config:
         config = SimulatorConfig.from_json(args.config)
+        if args.fp4_indexer:
+            config.use_fp4_indexer = True
     else:
         config = SimulatorConfig(
             backend=args.backend,

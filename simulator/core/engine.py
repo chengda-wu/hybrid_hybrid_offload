@@ -28,7 +28,10 @@ class SimulationEngine:
             self._model_arch = ModelArchitecture.from_json(config.model_config_path)
         else:
             self._model_arch = ModelArchitecture.deepseek_v4_flash()
-        self._model_arch.use_fp4_indexer = config.use_fp4_indexer
+        # Only override fp4 if simulator config explicitly set it (default is False).
+        # from_json may have already set it via enable_deepseek_v4_fp4_indexer.
+        if config.use_fp4_indexer:
+            self._model_arch.use_fp4_indexer = True
 
         # Build backend config.
         # For hybrid models, compute scheduler_block_size as LCM of group block sizes

@@ -312,7 +312,7 @@ python -m simulator.run --config batch_experiment.json -o result.json
 - **无测试覆盖**：当前无单元/集成测试（21 个 unittest 覆盖 allocate/acceptance/perf model，但缺 scheduler 和 E2E 集成测试），所有改动依赖人工 review。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
 - **无抢占**：分配失败时请求留在 PRE_FILL 状态重试，不会被换出。
-- **FP4 indexer**：通过 `ModelArchitecture.use_fp4_indexer` 开关控制（默认 132 B/token，fp4→68）。CLI 未暴露，需手动设置
+- **FP4 indexer**：通过 `--fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
 - **SGLang 三池建模**：容量上限已按 SWA/C4/C128 三池独立校验（_pool_caps/_pool_used），C128 为最小池先满触发驱逐，无跨池借用。底层索引空间共享单一平坦 allocator（RadixCache 要求）。prefix 匹配不受影响，但内存压力模型是近似的——真实 SGLang 各池独立触发 OOM（如 C128 仅 8192 token 即满），sim 单池把三池容量混在一起，C128 用尽时可从 SWA/C4 配额"借"，cache_usage 和驱逐时机会偏离真实。常规负载（<10% 利用率）下影响可忽略，高压场景需注意。

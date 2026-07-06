@@ -45,7 +45,7 @@ class SimulatorScheduler:
         # State
         self._step: int = 0
         self._sim_time: float = 0.0  # ms
-        self._warmup = config.warmup_steps
+        self._warmup = config.warmup_steps  # first N steps skipped from metrics; cache NOT cleared
         self._verbose = config.verbose
 
     # ------------------------------------------------------------------
