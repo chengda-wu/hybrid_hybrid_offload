@@ -76,19 +76,21 @@ DSV4 默认 `cache_dtype=fp8_ds_mla`，由 `_resolve_dsv4_kv_cache_dtype`（`att
 
 每层的 page_size 经三步推导。`storage_block_size = block_size // compress_ratio`（`kv_cache_interface.py:376,603`）：主MLA 实际存**压缩后**的 token，故每物理 block 只装 `block_size/cr` 个压缩 token；compressor 的 cr=1，block_size 即 storage_block_size。`alignment=576` 在 spec `__post_init__` 经 `_apply_alignment_padding`（`kv_cache_interface.py:327`）把 page 向上 pad 到 576 倍数（FlashMLA UE8M0 分块要求），`page_size_bytes` 属性返回 padded 值（`kv_cache_interface.py:182`）。
 
-| spec | block_size | cr | storage_block_size | per-token (B) | 未 pad page | 576 对齐后 page | 计算 |
-|------|-----------|-----|--------------------|--------------|------------|----------------|------|
-| #1 SWA | 64 | 1 | 64 | 584 | 37,376 | **37,440** | 65×576 |
-| #2 C4 主 comp | 4 | 1 | 4 | 8,192 | 32,768 | **32,832** | 57×576 |
-| #3 C128 comp | 8 | 1 | 8 | 4,096 | 32,768 | **32,832** | 57×576 |
-| #4 C4 主MLA | 256 | 4 | 64 | 584 | 37,376 | **37,440** | 65×576 |
-| #5 C128 主MLA | 256 | 128 | 2 | 584 | 1,168 | **1,728** | 3×576 |
-| #6 C4 indexer | 256 | 4 | 64 | 132 | 8,448 | **8,640** | 15×576 |
-| #7 C4 indexer comp | 4 | 1 | 4 | 2,048 | 8,192 | **8,640** | 15×576 |
+| spec | spec 类型 | block_size | cr | storage_block_size | per-token (B) | 未 pad page | 576 对齐后 page | 计算 |
+|------|----------|-----------|-----|--------------------|--------------|------------|----------------|------|
+| #1 SWA | SlidingWindowMLA | 64 | 1 | 64 | 584 | 37,376 | **37,440** | 65×576 |
+| #2 C4 主 comp | SlidingWindowMLA | 4 | 1 | 4 | 8,192 | 32,768 | **32,832** | 57×576 |
+| #3 C128 comp | SlidingWindowMLA | 8 | 1 | 8 | 4,096 | 32,768 | **32,832** | 57×576 |
+| #4 C4 主MLA | MLA (FullAttention) | 256 | 4 | 64 | 584 | 37,376 | **37,440** | 65×576 |
+| #5 C128 主MLA | MLA (FullAttention) | 256 | 128 | 2 | 584 | 1,168 | **1,728** | 3×576 |
+| #6 C4 indexer | MLA (FullAttention) | 256 | 4 | 64 | 132 | 8,448 | **8,640** | 15×576 |
+| #7 C4 indexer comp | SlidingWindowMLA | 4 | 1 | 4 | 2,048 | 8,192 | **8,640** | 15×576 |
 
 > 未 pad page = `storage_block_size × per-token`。
 > SWA(#1) 与 C4 主MLA(#4) 的 page 巧合相等（都 37,376→37,440）：SWA 是 `64 token × 584B`，C4 主MLA 是 `256/4=64 压缩 token × 584B`。
 > **§3 还有第二层 padding**：分组时 SWA-MLA 组的 page 会再 pad 到 full-MLA 组已有的 page_size。
+>
+> **spec 类型与运行时行为**：`SlidingWindowMLA`（#1,#2,#3,#7）运行时用 `SlidingWindowManager`，会跳过窗口外 token（用 null_block 占位，见 §7.3）；`MLA (FullAttention)`（#4,#5,#6）用 `FullAttentionManager`，不跳过，所有 token 都分配真实 block。这个差异直接影响 APC 命中（§7）和填充率（§4.6）。
 
 ---
 
