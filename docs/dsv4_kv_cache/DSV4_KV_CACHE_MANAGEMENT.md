@@ -284,7 +284,38 @@ backing[ offset(L_region) + slot_idx(L)×ps(L) + block_id × 1,039,680
 
 > 这正是 `_bucket_layers_by_page_size` 注释"they have independent block tables so block-id namespaces never collide"的含义：不是 id 数值不同，而是**不同组永不同时持有同一物理块**，所以同 offset 的视图安全复用。
 >
-> **代价**：每个物理块只被拥有它的那个 group 部分填充。如 G4(C128comp, 20 层) 拥有一个物理块时，只在 37440 区填入它组内某 1 个 c128_comp 层的 slot（37440B 区里用 32832B，8640/1728 区全空）。同理 G1/G2(SWA) 拥有的块只在 37440 区填 1 个 SWA slot。这是 packed 布局换取消除碎片化的代价——牺牲单块填充率，换来所有组共享同一 block pool 无碎片。
+> 这里有个关键推论常被误解：**一个 group 持有一个 block 时，组内所有层都往这个 block 写数据**（同 group 的所有层共享同一个 block_table，`gpu_model_runner.py:2466` "make layers in the same group share the same metadata"）。所以"一个 block 被某 group 持有"≠"只填 1 个 slot"，而是填该 group 全部层各自的 slot。填充率分析见 §4.6。
+
+### 4.6 所有 group 共用一个 block pool + 填充率分析
+
+**共用一个 pool**：`KVCacheCoordinator.__init__` 只创建**一个** `BlockPool`（`kv_cache_coordinator.py:91`），5 个 group 的 `SingleTypeKVCacheManager` 全部拿到**同一个** `block_pool` 引用（`kv_cache_coordinator.py:112`）。`BlockPool` 内部只有一个 `free_block_queue`（`block_pool.py:182`），block id 空间统一 `0..num_blocks-1`，不按 group 分区。任意 group 调 `get_new_blocks` 都从同一队首捞，block id 不与 group 绑定。
+
+**一个 block 被某 group 持有时填多少字节**：因为同 group 所有层共享 block_table，group G 持有 block N 时，G 的每一层都在 block N 的对应 region 写 1 个 slot。故 G 的填充字节数 = `Σ (G 在各 ps 的层数 × ps)`。
+
+每个 region 的 slot 数 = 各 group 在该 ps 下层数的**最大值**（§4.1：37440 区 22 slot、8640 区 21 slot、1728 区 20 slot）。所以：
+
+| group | 持有 1 block 时填写 | 计算（各 ps 层数 × ps） | 填充率 | 浪费 |
+|-------|------------------|---------------------|--------|------|
+| **G0** (62层: 21 c4_mla+20 c128_mla+21 c4_idx) | 1,002,240 B | 21×37440 + 20×1728 + 21×8640 | **96.4%** | 3.6% |
+| **G1** (22 SWA) | 823,680 B | 22×37440 | **79.2%** | 20.8% |
+| **G2** (21 SWA) | 786,240 B | 21×37440 | **75.6%** | 24.4% |
+| **G3** (42层: 21 c4_comp+21 c4_idx_comp) | 967,680 B | 21×37440 + 21×8640 | **93.1%** | 6.9% |
+| **G4** (20 C128comp) | 748,800 B | 20×37440 | **72.0%** | 28.0% |
+
+> `bytes_per_block = 1,039,680 B`。填充率 = 填写字节 / 1,039,680。
+>
+> **G0 填充率最高（96.4%）**：它含 3 种 page_size 的层，持有 block 时在 3 个 region 都填 slot，几乎填满（37440 区用 21/22 slot，8640 区 21/21 填满，1728 区 20/20 填满）。
+>
+> **G4 填充率最低（72.0%）**：它只有 20 个 c128_comp 层，全在 37440 区（用 20/22 slot），8640 区和 1728 区**全空**——这部分就是浪费。
+
+**浪费的来源**：每个 region 的 slot 数按"层数最多的 group"预留（37440 区按 G1 的 22 层预留），但持有 block 的 group 可能层数更少（如 G4 只有 20 层），多出的 slot 就空着。此外，持有 block 的 group 若不涉及某 region（如 G1/G2/G4 不涉及 8640、1728 区），整个 region 都空。
+
+**为什么仍值得**：packed 布局用"单 block 部分填充"换"统一 pool 零碎片"。若每个 group 独立 pool，用量小的 group pool 闲置、用量大的 group 不够用——内部碎片。共用 pool 让总利用率 = 总需求 / 总容量，无内部碎片。对 DSV4 这种 6 类异构 cache 的模型，统一 pool 的简化（无需为每类 cache 单独规划容量）被认为值得单 block 的填充率损失。
+
+**vLLM 的缓解措施**：
+- `_approximate_gcd`（§3.2）选 d=22 让 SWA 43 层分裂成 22+21，而非更大 padding——直接缩小 37440 区的 slot 数（若选 d=43，37440 区要 43 slot，浪费更大）。
+- 第二层 page_size padding（§3.2a）把 compressor 的 32832 pad 到 37440，每 slot 额外浪费 4,608 B，但换来 compressor 能与 SWA/mainMLA 共 37440 桶。
+- 非 packed 路径（`get_kv_cache_config_from_groups` general case，`kv_cache_utils.py:1368`）要求所有 group page_size 相同——DSV4 有 3 种 page_size 走不了，故 packed 是唯一选择（除非 `--disable-hybrid-kv-cache-manager` 退化成全 full-attention，丢失 SWA/compressor 的 KV 节省）。
 
 ---
 
@@ -495,6 +526,13 @@ spec type counts: Counter({'SlidingWindowMLASpec': 105, 'MLAAttentionSpec': 62})
   ps=  37440  slot_count=22  layers_per_slot=[5×20, 4, 1]
   bytes_per_block = 1039680
 
+--- per-group fill rate (block owned = all group layers write 1 slot) ---
+  G0: 1,002,240 B / 1,039,680 =  96.4%  (20×1728 + 21×8640 + 21×37440)
+  G1:   823,680 B / 1,039,680 =  79.2%  (22×37440)
+  G2:   786,240 B / 1,039,680 =  75.6%  (21×37440)
+  G3:   967,680 B / 1,039,680 =  93.1%  (21×8640 + 21×37440)
+  G4:   748,800 B / 1,039,680 =  72.0%  (20×37440)
+
   scheduler_block_size=256  hash_block_size=4
 
 --- _get_kv_cache_config_packed ---
@@ -510,6 +548,7 @@ spec type counts: Counter({'SlidingWindowMLASpec': 105, 'MLAAttentionSpec': 62})
 - 3 buckets：37440(22 slots) / 8640(21 slots) / 1728(20 slots)
 - bytes_per_block = 1,039,680；63 tensors 共享 1 backing
 - scheduler_block_size=256，hash_block_size=4
+- 单 block 填充率（group 持有时）：G0 96.4% / G1 79.2% / G2 75.6% / G3 93.1% / G4 72.0%（见 §4.6）
 
 > 若 vLLM submodule 升级后分组逻辑变化，重跑此脚本即可更新文档数值。
 

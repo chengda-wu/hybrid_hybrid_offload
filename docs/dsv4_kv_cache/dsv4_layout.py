@@ -186,6 +186,27 @@ def main() -> None:
         total_per_block += ps * len(slots)
     print(f"  bytes_per_block = {total_per_block}")
 
+    # --- Step 2b: per-group fill rate when it owns one block ---
+    # A group owns a block -> all its layers write 1 slot each into that block
+    # (same-group layers share one block_table, gpu_model_runner.py:2466).
+    # Fill bytes = sum over the group's layers of page_size_bytes.
+    print(f"\n--- per-group fill rate (block owned = all group layers write 1 slot) ---")
+    from collections import Counter as _Counter
+
+    for gi, g in enumerate(groups):
+        sp = g.kv_cache_spec
+        if isinstance(sp, UniformTypeKVCacheSpecs):
+            ps_count = _Counter(s.page_size_bytes for s in sp.kv_cache_specs.values())
+            filled = sum(c * ps for ps, c in ps_count.items())
+            detail = " + ".join(f"{c}×{ps}" for ps, c in sorted(ps_count.items()))
+        else:
+            filled = sp.page_size_bytes
+            detail = f"1×{sp.page_size_bytes}"
+        fill_pct = filled / total_per_block * 100
+        print(
+            f"  G{gi}: {filled:>8,} B / {total_per_block:,} = {fill_pct:5.1f}%  ({detail})"
+        )
+
     # --- Step 3: scheduler / hash block size ---
     kv_cache_config = SimpleNamespace(kv_cache_groups=groups)
     sched_bs, hash_bs = resolve_kv_cache_block_sizes(kv_cache_config, vllm_cfg)
