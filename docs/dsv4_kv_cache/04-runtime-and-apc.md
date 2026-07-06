@@ -64,6 +64,8 @@ hash_block_size      = GCD(...) = 4      # block hash 计算粒度（prefix cach
 
 > 注：G1-G4 都是 `SlidingWindowMLASpec`（`_sw`），用 `SlidingWindowManager`，会跳过窗口外的 token（见 §7.3）。G0 是 `FullAttentionManager`，不跳过。
 
+> **上表是 prefill 视角的 block 数**（`ceil(N / block_size)`，纯按 block_size 切分）。prefill 时 `num_computed_tokens = 0`，`get_num_skipped_tokens(0) = 0`（`single_type_kv_cache_manager.py:864`），窗口外跳过尚未生效，故 512 token 全分配——G1/G2 各 8 个真实 block、G3 128 个、G4 64 个，**0 个 null**。窗口外 block 的释放在 **decode 阶段窗口移动后**才发生：每步 decode `remove_skipped_blocks`（`kv_cache_manager.py:400`）把 `get_num_skipped_tokens(computed) // block_size` 个窗口外 block 替换成 `null_block` 并归还 free list。实测 A prefill 512 后第 1 步 decode（computed=513）：G1 `real 8→3`、G3 `real 128→3`、G4 `real 64→17`，其余变 null。故 SWA 的 KV 内存节省体现在 decode 稳态，不在 prefill 当下。
+
 ### 7.2 Phase 1：A 到达，全分配（无命中）
 
 A 的 `get_computed_blocks` → hashmap 空，`num_computed = 0`。
