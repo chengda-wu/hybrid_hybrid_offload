@@ -37,46 +37,61 @@ hash_block_size      = GCD(...) = 4      # block hash 计算粒度（prefix cach
 
 ### 6.1 SWA skip 机制：skip token 与 skip block
 
-`SlidingWindowMLASpec` 的窗口外 KV 不需要保留，vLLM 在**三个层面**协同跳过，殊途同归地省下窗口外的 KV 内存：
+`SlidingWindowMLASpec`（`_sw` 类型）的窗口外 KV 不需保留。vLLM 用 `get_num_skipped_tokens` 决定跳过多少，**而它是否触发，取决于"已经算完多少 token"，与 prompt 长度无关**——这正是 prefill 与 decode 行为分化的根因。
 
-#### (1) 分配侧 —— skip token 决定 skip block（运行时持续释放）
-
-核心公式（`SlidingWindowManager.get_num_skipped_tokens`，`single_type_kv_cache_manager.py:838,864`）：
+**核心公式**（`SlidingWindowManager.get_num_skipped_tokens`，`single_type_kv_cache_manager.py:838,864`）：
 
 ```
-num_skipped_tokens(n) = max(0, n - sliding_window + 1)      # n = num_computed_tokens
+n = total_computed_tokens                          # 本步调度前已算完的 token 数
+num_skipped_tokens(n) = max(0, n - sliding_window + 1)
 num_skipped_blocks    = num_skipped_tokens // block_size
 ```
 
-含义：当前已计算 `n` 个 token，下一个 token 的注意力窗口覆盖 `[n - sw + 1, n]`，窗口**之前**的 token 都可跳过。`n < sw` 时 skip=0（窗口还没移出序列头）。
+`n` 的来源（`allocate_slots` L355-361, L400-404）：`n = request.num_computed_tokens + num_new_computed_tokens(prefix命中) + num_external_computed_tokens`。**关键是它只算"本步之前已算完的 token"，本步要新算的 `num_new_tokens` 不计入**——所以 prefill（还没算过任何 token）和 decode（已经算完整个 prompt）取到完全不同的 `n`。
+
+#### prefill vs decode：skip 何时触发
+
+| 阶段 | `n`（已算完） | `num_skipped_tokens` | 后果 |
+|------|--------------|---------------------|------|
+| **prefill**（请求刚到，无命中） | 0 | `max(0, 0-sw+1) = 0` | **不 skip**：整个 prompt 全分配真实 block，0 个 null。即使 prompt=512 > sw=128 也不释放——"还没算过任何 token"，skip 公式无从触发 |
+| **decode step 1**（prefill 算完后） | 512 | `max(0,512-128+1) = 385` | **开始 skip**：窗口外的 block 在 `remove_skipped_blocks` 里被释放成 null |
+| **decode step k** | 512 + (k-1) | 每步 +1 | skip_tokens 单调增；skip_blocks 只在跨 block 边界时才新增 null |
+
+实测对比（A = 512 token prompt，无 prefix 命中）：
+
+| 阶段 | `n` | skip_tokens | G1 (bs64,sw128) | G3 (bs4,sw8) | G4 (bs8,sw128) |
+|------|-----|-------------|-----------------|--------------|----------------|
+| prefill | 0 | 0 | real=8, null=0 | real=128, null=0 | real=64, null=0 |
+| decode step 1 | 512 | 385 | real=3, null=6 | real=3, null=126 | real=17, null=48 |
+
+> decode step 1 的 real 数 = 窗口内残留 block + 1 个新 decode block：G1 `cdiv(128,64)=2` 残留 +1 = 3；G3 `cdiv(8,4)=2` +1 = 3；G4 `cdiv(128,8)=16` +1 = 17。null 数 = prompt block 数 − 残留 block 数（G1 `8−2=6`、G3 `128−2=126`、G4 `64−16=48`）。
+>
+> **结论：SWA 的 KV 内存节省是 decode 稳态属性，不是 prefill 属性。** prefill 阶段窗口外的 KV 暂时全量保留（"多分配"），要等到 decode 第一步 `remove_skipped_blocks` 才被释放。
+
+下面三层都围绕"`n` = 已算完 token 数"展开，但每层在 prefill/decode 下的表现不同。
+
+#### (1) 分配侧 —— skip token 决定 skip block（运行时持续释放）
 
 每次 `allocate_slots`（`kv_cache_manager.py:400`）开头先调 `remove_skipped_blocks`（`single_type_kv_cache_manager.py:507`）：
 - 算出 `num_skipped_blocks`，把 block table **前** `num_skipped_blocks` 个真实 block 替换成 `null_block`（id=0）并归还 free list（`_remove_blocks_in_range:480`）。
-- block table **长度不变**：被释放的 block 用 `null_block` 占位，保持 token→block 索引关系，attention kernel 靠位置算窗口，不读 null 标记。
+- block table **长度不变**：被释放的 block 用 `null_block` 占位，保持 token→block 索引关系；attention kernel 靠位置算窗口，不读 null 标记。
 - `allocate_new_blocks`（base class，`:279`）随后只为新 token 追加 block：`num_new = cdiv(num_tokens, bs) - len(req_blocks)`，因 `len(req_blocks)` 含 null 占位，不会因 skip 多分配。
 
-**prefill vs decode 的关键区别**（实测，A = 512 token prompt）：
-
-| 阶段 | `n=num_computed` | `get_num_skipped_tokens` | G1 (bs64,sw128) | G3 (bs4,sw8) | G4 (bs8,sw128) |
-|------|------|------|------|------|------|
-| prefill 512 | 0 | 0 | real=8, null=0 | real=128, null=0 | real=64, null=0 |
-| decode step 1 | 513 | 386 | real=3, null=6 | real=3, null=126 | real=17, null=48 |
-
-prefill 时 `n=0` → skip=0 → 整个 prompt 全分配真实 block（§7.1 表格的 8/128/64 即此）。decode 第 1 步 `n=513` → 窗口外的 block 被释放成 null，只剩窗口内 `cdiv(sw, bs)` 量级的真实 block。**SWA 的 KV 内存节省是 decode 稳态属性，不是 prefill 属性。**
-
-> 实测 decode step 1 的真实 block 数：G1 `real=3` = 窗口 128 token ÷ bs64 ≈ 2 block + 当前新 block；G3 `real=3` ≈ 窗口 8 token ÷ bs4 = 2 block + 新 block；G4 `real=17` ≈ 窗口 128 ÷ bs8 = 16 block + 新 block。均符合 `cdiv(sw, bs) + 1` 量级。
+**prefill 时此函数仍被调用，但 `n=0` → `skip_blocks=0` → 一个 block 都不释放**（上表第一行）；decode 时 `n>sw` 才真正释放（上表第二行）。这是"分配侧只有 decode 才 skip"的来源。
 
 #### (2) 命中侧 —— 连续 block 命中（APC 查找）
 
 `SlidingWindowManager.find_longest_cache_hit`（`single_type_kv_cache_manager.py:688`）与分配侧用同一个 `get_num_skipped_tokens`，但实现不同：
 
 1. 先把整个候选命中区间 `[0, max_num_blocks)` **全部预填 `null_block`**（`:718`）。
-2. 需要连续 `cdiv(sliding_window - 1, block_size)` 个真实 block 命中才算 hit（`_contiguous_blocks_for_hit:675,678`）——因为窗口必须完整覆盖这么多 block 才能复用。
+2. 需连续 `cdiv(sliding_window - 1, block_size)` 个真实 block 命中才算 hit（`_contiguous_blocks_for_hit:675,678`）——窗口必须完整覆盖这么多 block 才能复用。
 3. **从右往左**扫描，找到连续命中后 trim 掉右侧多余 null，**左侧的 null 全部保留**作为窗口外占位。
 
-故命中块序列 = 若干 `null_block`（窗口外）+ 窗口内真实 block。null 数 = `命中块数 - cdiv(sw-1, bs)`。详见 §7.3 推导表。
+命中块序列 = 若干 `null_block`（窗口外）+ 窗口内真实 block。null 数 = `命中块数 − cdiv(sw-1, bs)`，详见 §7.3 推导表。
 
-#### (3) 计算侧 —— triton kernel 只 gather 窗口内 KV
+**此侧只对"有 prefix 命中"的请求生效**（如 §7.3 的 B，命中 256 token）。全新 prefill（无命中）走不到这里。命中侧与分配侧算的是同一个 `n`、同一个 `get_num_skipped_tokens`，两侧的 null 语义一致、互不矛盾——分配侧释放窗口外 block 成 null，命中侧预填窗口外 null，都是"窗口外用 null_block 占位"。
+
+#### (3) 计算侧 —— triton kernel 只 gather 窗口内 KV（prefill 与 decode 都生效）
 
 attention forward 时，`_compute_swa_indices_and_lens_kernel`（`sparse_swa.py:612`）对每个 query position `pos` 算：
 
@@ -84,17 +99,25 @@ attention forward 时，`_compute_swa_indices_and_lens_kernel`（`sparse_swa.py:
 start_pos = max(pos - window_size + 1, 0)     # sparse_swa.py:644
 ```
 
-只在该 `[start_pos, pos]` 窗口内 gather KV。block table 里 `null_block` 占位的位置即便被间接索引到，也是全零且落在窗口外（mask 掉），不参与计算。`decode_swa_indices`（`sparse_swa.py:339,412`）预计算每个 decode token 的窗口索引下标。
+只在该 `[start_pos, pos]` 窗口内 gather KV。`decode_swa_indices`（`sparse_swa.py:339,412`）预计算每个 decode token 的窗口索引下标。
+
+**这里 prefill 与 decode 都用窗口**——计算侧的 skip 按 query **位置** `pos` 算，与 `num_computed_tokens` 无关：prefill 第 200 个 token 只 attend `[73,200]`，decode 第 512 个 token 只 attend `[385,512]`。block table 里 `null_block` 占位的位置即便被间接索引到，也落在窗口外（mask 掉），不参与计算。
+
+> **易混点：计算侧与分配侧的 skip 触发条件不同**。
+> - 计算侧（triton kernel）按 query **位置** `pos` 算窗口，**prefill 和 decode 都 skip**（只 gather 窗口内 KV）。
+> - 分配侧（`remove_skipped_blocks`）按 `n=num_computed_tokens` 算 skip，**只有 decode 才 skip**（释放窗口外 block）。
+>
+> 所以 prefill 时计算上已不用窗口外 KV，但内存上仍全量保留——直到 decode 才释放。这就是"SWA 省 KV 是 decode 属性、不是 prefill 属性"的根因。
 
 #### 三层的关系
 
-| 层面 | 作用对象 | 何时生效 | 用 null_block? |
-|------|---------|---------|---------------|
-| 分配侧 `get_num_skipped_tokens` + `remove_skipped_blocks` | block table（释放窗口外 block） | 每次 `allocate_slots`（decode 推进后） | 是，替换被释放 block |
-| 命中侧 `find_longest_cache_hit` | APC 命中块序列 | `get_computed_blocks` 查 prefix cache | 是，预填窗口外占位 |
-| 计算侧 triton kernel | attention 的 KV gather | 每次前向 | 否，靠 `pos` 算窗口，null 位置被 mask |
+| 层面 | 作用对象 | skip 触发条件 | prefill 是否 skip | 用 null_block? |
+|------|---------|--------------|------------------|---------------|
+| 分配侧 `remove_skipped_blocks` | block table（释放窗口外 block） | `n=num_computed_tokens > sw` | **否**（`n=0`） | 是，替换被释放 block |
+| 命中侧 `find_longest_cache_hit` | APC 命中块序列 | 有 prefix 命中即可 | 否（全新请求无命中） | 是，预填窗口外占位 |
+| 计算侧 triton kernel | attention 的 KV gather | 按 query 位置 `pos`，恒生效 | **是**（按位置） | 否，靠 `pos` 算窗口，null 位置被 mask |
 
-三层共用"窗口 = `[n - sw + 1, n]`"这一语义，但分别管**内存释放**、**prefix 命中**、**计算 gather**。null_block 是分配侧/命中侧的 block table 占位手段，计算侧不依赖它。
+分配/命中侧用"窗口 = `[n - sw + 1, n]`"（`n` = 已算完 token），计算侧用"`[pos-sw+1, pos]`"（`pos` = query 位置）。三层分别管**内存释放**、**prefix 命中**、**计算 gather**，prefill/decode 下只有计算侧恒 skip，另两侧要等 decode（或等命中）才 skip。null_block 是分配侧/命中侧的 block table 占位手段，计算侧不依赖它。
 
 ---
 
