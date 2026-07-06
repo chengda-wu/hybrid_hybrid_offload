@@ -36,8 +36,8 @@
 ## 9. 数值实测验证
 
 本文档数值由两类实测得出（非手算）：
-- **§1-§5 的布局数值**（groups/buckets/bytes_per_block/scheduler_bs 等）：由 `dsv4_layout.py` 调真实 vLLM 布局函数得出。
-- **§7 的 block id 与 ref_cnt**：由真实 `KVCacheManager`（`generate_scheduler_kv_cache_config` + `KVCacheManager`）跑 A/B 请求得出。这需要 `UniformTypeKVCacheSpecs` 先经 `generate_scheduler_kv_cache_config` 拆成具体 spec（`kv_cache_utils.py:1766`），否则 manager 无法创建。
+- **§1-§5 的布局数值**（groups/buckets/bytes_per_block/scheduler_bs 等）：由 `dsv4_layout.py` 调真实 vLLM 布局函数得出，预期输出见 §9.3。
+- **§7 的 block id 与 null_block 数**：block id 来自上一轮用真实 `KVCacheManager` 跑 A/B 请求的实测；null_block 数经 `SlidingWindowManager.find_longest_cache_hit` 源码逻辑核验（`cdiv(sw-1, block_size)` 连续命中，见 §7.3 推导表）。注：vLLM 的 `KVCacheManager` 构造 API 在 submodule 升级后有变动（`get_kv_cache_groups` 现需 `(vllm_config, kv_cache_spec)` 两参，`generate_scheduler_kv_cache_config` 现接收 `list[KVCacheConfig]`），`dsv4_layout.py` 已跟进；§7 的 block id 数值不受 API 变动影响（由 free list 顺序消费决定）。
 
 ### 9.1 脚本位置与作用
 
@@ -60,6 +60,8 @@ cd /home/witcher/hybrid_hybrid_offload
 > 无需改任何源码，脚本直接 `import vllm.v1.*`。
 
 ### 9.3 预期输出
+
+> 注：`layers_per_slot` 下面用 `n×k` 缩写表示"k 重复 n 次"（脚本实际打印展开的完整列表，如 `[1, 1, ..., 1]`）。
 
 ```
 layers: SWA-only=2 C4=21 C128=20 total=43
@@ -116,7 +118,6 @@ spec type counts: Counter({'SlidingWindowMLASpec': 105, 'MLAAttentionSpec': 62})
 
 *文档生成于 2026-07-06，基于 vLLM submodule HEAD（ab132ee98）。*
 *所有 group/bucket/slot/bytes 数值由真实 vLLM 分组函数实测验证。*
-
 
 ---
 
