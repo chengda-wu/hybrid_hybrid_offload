@@ -36,17 +36,18 @@ class VLLMConfig:
         cache_dtype_str = "fp8_ds_mla" if arch.is_mla else None
         kv_dtype = _torch.uint8 if arch.is_mla else getattr(_torch, arch.dtype)
 
-        # MTP draft layer count.  DeepSeek V4 Flash has 1 MTP layer
-        # (config.num_nextn_predict_layers).  In real vLLM the MTP draft layer
-        # is a DeepseekV4Attention with compress_ratio=1, so it has no MLA /
-        # compressor / indexer — only a DeepseekV4SWACache (sparse_swa.py:81)
-        # whose SlidingWindowMLASpec is identical to the target SWA spec
-        # (same block_size/head_size/sliding_window/alignment → same page_size).
-        # It therefore joins the SWA bucket, growing it by num_mtp_layers.
-        # The draft layer shares the target block pool (llm_base_proposer.py
-        # asserts all draft layers belong to one kv_cache_group), so no new
-        # group or pool is added — only the SWA bucket's layer count rises.
-        num_mtp_layers = 1 if bc.num_spec_tokens > 0 else 0
+        # MTP draft layer count, from the model architecture
+        # (config.num_nextn_predict_layers; DeepSeek V4 Flash = 1).  In real
+        # vLLM each MTP draft layer is a DeepseekV4Attention with
+        # compress_ratio=1, so it has no MLA / compressor / indexer — only a
+        # DeepseekV4SWACache (sparse_swa.py:81) whose SlidingWindowMLASpec is
+        # identical to the target SWA spec (same block_size/head_size/
+        # sliding_window/alignment → same page_size).  Each MTP layer therefore
+        # joins the SWA bucket, growing it by num_mtp_layers.  Draft layers
+        # share the target block pool (llm_base_proposer.py asserts all draft
+        # layers belong to one kv_cache_group), so no new group or pool is
+        # added — only the SWA bucket's layer count rises.
+        num_mtp_layers = arch.num_mtp_layers if bc.num_spec_tokens > 0 else 0
 
         groups: list[KVCacheGroupSpec] = []
 

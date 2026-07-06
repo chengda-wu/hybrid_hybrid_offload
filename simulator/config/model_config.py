@@ -36,6 +36,15 @@ class ModelArchitecture:
     compress_ratios: list[int] | None = None  # per-layer list from config.json
     sliding_window: int | None = None
 
+    # MTP (Multi-Token Prediction) draft layers.
+    # DeepSeek V4 Flash has 1 (config.num_nextn_predict_layers).  Only the
+    # vLLM backend uses this — each MTP draft layer adds one SWA-cache layer
+    # to the shared block pool (compress_ratio=1 → no MLA/compressor/indexer).
+    # The SGLang backend ignores it: real SGLang hardcodes draft_layers=1 in
+    # its (T+D)/T inflation (pool_configurator.py:543), so the simulator
+    # matches that regardless of this field.
+    num_mtp_layers: int = 1
+
     # KV options
     use_fp4_indexer: bool = False  # deepseek_v4_memory_pool.py:279-282
 
@@ -163,6 +172,7 @@ class ModelArchitecture:
             sliding_window=cfg.get("sliding_window"),
             vocab_size=cfg.get("vocab_size", 129280),
             use_fp4_indexer=cfg.get("enable_deepseek_v4_fp4_indexer", False),
+            num_mtp_layers=cfg.get("num_nextn_predict_layers", 1),
         )
 
     @classmethod
