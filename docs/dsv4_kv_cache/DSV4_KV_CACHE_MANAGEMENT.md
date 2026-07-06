@@ -100,7 +100,7 @@ DSV4 默认 `cache_dtype=fp8_ds_mla`，由 `_resolve_dsv4_kv_cache_dtype`（`att
 |------|------|----------|
 | **Group(组)** | 一组**同 spec 类型**的层；拥有**独立 block table + 独立 block-id 命名空间**，由一个 `SingleTypeKVCacheManager` 管理。 | **5 个 group**（见 §3） |
 | **Bucket(桶)** | packed 布局里把**所有组的所有层**按 `page_size_bytes`(padded) 重新分桶。`buckets[ps]` = 该 page size 下的所有 slot。 | **3 个桶**（见 §4） |
-| **Slot(槽)** | 桶内下标 `slot_idx`。bucketing **逐组**扫描，组内第 i 个 page_size=ps 的层拿 slot i；**跨组**处于相同 `(ps, slot_idx)` 的层共享**同一 `KVCacheTensor`**（即同一 offset+block_stride 视图）。**slot 数 = 该 ps 下各组的最大 layer_count**；若某 ps 涉及多个 group（如 SWA 分裂成 G1/G2），各 group 独立递增 slot_idx，会在同 slot 重叠。 | 见 §4 |
+| **Slot(槽)** | **层在物理 block 内的"座位号"**，与 token 位置无关。bucketing **逐组**扫描，组内第 i 个 page_size=ps 的层拿 slot_idx=i（`kv_cache_utils.py:1247` `slot_idx = slot_count[ps]; slot_count[ps] += 1`）。层 L 在 block N 内的字节偏移 = `offset(ps, slot_idx) + N × block_stride`（`gpu_model_runner.py:7117`）。**slot 数 = 该 ps 下各组的最大 layer_count**；跨组同 `(ps, slot_idx)` 的层共享同一 `KVCacheTensor`（同一 offset+block_stride 视图），但写入不同物理 block（block_id 不同）。 | 见 §4 |
 | **Block(物理块)** | pool 里的一个单元，大小 = `bytes_per_block = Σ ps × #(slots at ps)`。id ∈ [0, num_blocks)。任意时刻**只归一个 group**。 | 1,039,680 B |
 
 **关系链**：
@@ -110,6 +110,30 @@ Layer  ──属于──▶ 某个 Group
 Layer  ──按 page_size 归入──▶ Bucket ──内含──▶ 多个 Slot
 Slot   ──对应──▶ 一个 KVCacheTensor(offset, block_stride) = 物理块内一段字节区
 ```
+
+### slot / block_id / slot_mapping 三者区分（易混淆）
+
+文档里的 "slot" 是 **packed 布局规划层面的 `slot_idx`**，不是运行时的 `slot_mapping`。三者必须分开：
+
+| 概念 | 决定什么 | 由什么决定 | 与 token 关系 |
+|------|---------|-----------|-------------|
+| **block_id** | 写入哪个物理块 | 请求的 token 段经 group 的 block_table 映射 | **直接绑定**（token 段 → block） |
+| **slot_idx**（本文档的 slot） | 层在 block 内的字节偏移 | 该 group 内同 page_size 的**层序号** | **无关**（层的属性，不随 token 变） |
+| **slot_mapping**（运行时） | 每个 token 写入 block 内的具体字节位置 | token 位置 + block_table（`block_id×block_size + 块内偏移`） | **直接绑定**（每 token 一个） |
+
+**一句话**：block_id 回答"哪个块"，slot_idx 回答"层在块内的座位"，slot_mapping 回答"token 在块内的座位"。slot_idx 是**层的属性**（同层在所有 block 里座位号相同），不是 token 的属性。
+
+**层的写入地址公式**（`gpu_model_runner.py:7191`，`torch.as_strided`）：
+```
+层 L 的 KV[block_id=N, token=t] 位于 backing[
+    offset(L 的 ps, L 的 slot_idx) + N × block_stride + (t 在块内的偏移)
+]
+```
+- `offset(ps, slot_idx)`：固定，由 packed 规划决定（与 token、block_id 都无关）
+- `N × block_stride`：由 block_table 定位到哪个块；
+- `t 在块内偏移`：由 token 位置决定（运行时 slot_mapping 算的）。
+
+> 注意：vLLM 源码里 `slot_mapping`（运行时，token 级）和 `slot_idx`（packed 规划，层级）都叫 "slot"，但完全是两个概念。本文档除本节外，"slot" 一律指规划层面的 `slot_idx`。
 
 ---
 
