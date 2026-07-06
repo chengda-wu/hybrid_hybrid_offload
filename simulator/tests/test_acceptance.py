@@ -1,4 +1,9 @@
-"""Acceptance model tests: ValueError on rates < K, chain-breaking, etc."""
+"""Acceptance model tests: ValueError on rates < K, chain-breaking, etc.
+
+Drafts are always ground truth (SpeculativeDecodeEngine); acceptance is
+purely the per-position rate. rate 1.0 ⇒ always accept, 0.0 ⇒ always reject,
+so chain-breaking is tested deterministically.
+"""
 
 import unittest
 
@@ -45,55 +50,50 @@ class TestAcceptanceRatesValidation(unittest.TestCase):
 
 
 class TestAcceptanceLogic(unittest.TestCase):
-    """Core acceptance behavior."""
+    """Core acceptance behavior — rate-driven, deterministic at 0.0/1.0."""
 
     def setUp(self):
-        cfg = SpeculativeDecodeConfig(
-            accept_mode="per_position",
-            acceptance_rates=[0.99, 0.99, 0.99],  # nearly always accept
-            num_spec_tokens=3,
-        )
-        self.model = AcceptanceModel(cfg, seed=42)
-        # Ground truth: tokens 10-19
+        # Ground truth: tokens 10-19 (indices 0-9)
         self.req = SimRequestState("t1", [1, 2], list(range(10, 20)), 10)
 
-    def test_all_matching_drafts_accepted_with_high_rate(self):
-        # output=[10], first draft after bonus checks ground_truth[2]=12
-        self.req.output_token_ids = [10]
-        accepted, rejected, beyond = self.model.evaluate(self.req, [12, 13, 14])
-        self.assertEqual(accepted + rejected + beyond, 3)
-        self.assertEqual(beyond, 0)
-        self.assertGreaterEqual(accepted, 2)  # high rate => most accepted
+    def _eval(self, rates, output_token_ids, drafts):
+        cfg = SpeculativeDecodeConfig(
+            accept_mode="per_position",
+            acceptance_rates=rates,
+            num_spec_tokens=len(drafts),
+        )
+        model = AcceptanceModel(cfg, seed=42)
+        self.req.output_token_ids = output_token_ids
+        return model.evaluate(self.req, drafts)
 
-    def test_first_mismatch_breaks_chain(self):
-        self.req.output_token_ids = [10]
-        accepted, rejected, beyond = self.model.evaluate(self.req, [999, 12, 13])
-        self.assertEqual(accepted, 0, "first draft wrong, should reject all")
-        self.assertEqual(rejected, 3)
-        self.assertEqual(beyond, 0)
+    def test_full_rate_accepts_all(self):
+        # output=[10], first draft at ground_truth[2]=12
+        accepted, rejected, beyond = self._eval([1.0, 1.0, 1.0], [10], [12, 13, 14])
+        self.assertEqual((accepted, rejected, beyond), (3, 0, 0))
 
-    def test_mid_chain_mismatch(self):
-        self.req.output_token_ids = [10]
-        accepted, rejected, beyond = self.model.evaluate(self.req, [12, 999, 13])
-        self.assertEqual(accepted, 1, "only first draft correct")
-        self.assertEqual(rejected, 2)
-        self.assertEqual(beyond, 0)
+    def test_first_rejection_breaks_chain(self):
+        accepted, rejected, beyond = self._eval([0.0, 1.0, 1.0], [10], [12, 13, 14])
+        self.assertEqual((accepted, rejected, beyond), (0, 3, 0))
+
+    def test_mid_chain_rejection(self):
+        accepted, rejected, beyond = self._eval([1.0, 0.0, 1.0], [10], [12, 13, 14])
+        self.assertEqual((accepted, rejected, beyond), (1, 2, 0))
 
     def test_bonus_offset_correct(self):
         """Draft[i] checks ground_truth[output_position + 1 + i]."""
-        self.req.output_token_ids = [10, 11]
         # output_pos=2, first draft at 2+1+0=3 → ground_truth[3]=13
-        accepted, _, _ = self.model.evaluate(self.req, [13, 14, 15])
-        self.assertGreaterEqual(accepted, 2)
+        accepted, _, _ = self._eval([1.0, 1.0, 1.0], [10, 11], [13, 14, 15])
+        self.assertEqual(accepted, 3)
 
     def test_beyond_ground_truth_breaks(self):
-        self.req.output_token_ids = [10, 11, 12, 13, 14, 15, 16, 17, 18]
-        # output_pos=9, first draft at 9+1+0=10 → ground_truth[10] out of range
-        accepted, rejected, beyond = self.model.evaluate(self.req, [19, 99, 99])
-        self.assertEqual(accepted, 0, "only one token left at pos 10=out of range")
+        # output_pos=9, first draft at 9+1+0=10 → out of range
+        accepted, rejected, beyond = self._eval(
+            [1.0, 1.0, 1.0],
+            [10, 11, 12, 13, 14, 15, 16, 17, 18],
+            [19, 99, 99],
+        )
         # All 3 fall beyond ground truth — not real rejections.
-        self.assertEqual(rejected, 0)
-        self.assertEqual(beyond, 3)
+        self.assertEqual((accepted, rejected, beyond), (0, 0, 3))
 
 
 if __name__ == "__main__":

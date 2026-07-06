@@ -30,9 +30,7 @@ class SimulatorScheduler:
     ):
         self._config = config
         self._backend = kv_backend
-        self._spec_engine = SpeculativeDecodeEngine(
-            config.speculative, seed=config.random_seed
-        )
+        self._spec_engine = SpeculativeDecodeEngine(config.speculative)
         self._acceptance = acceptance_model
         self._gpu_perf = gpu_perf_model
         self._recorder = recorder
@@ -204,9 +202,9 @@ class SimulatorScheduler:
         if output_pos < len(req.ground_truth_output):
             bonus_token = req.ground_truth_output[output_pos]
 
-        # drafts[0] would be the bonus prediction; drafts[1:] are the K spec
-        # tokens. When speculation is off, drafts is empty → K=0.
-        spec_tokens = drafts[1:] if drafts else []
+        # drafts are the K spec tokens (ground truth at upcoming positions).
+        # When speculation is off, drafts is empty → K=0.
+        spec_tokens = drafts
 
         K = len(spec_tokens)
 

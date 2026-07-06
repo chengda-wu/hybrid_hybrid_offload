@@ -45,7 +45,6 @@ def main(argv: list[str] | None = None) -> int:
                 accept_mode=args.accept_mode,
                 acceptance_rate=args.acceptance_rate,
                 acceptance_rates=args.acceptance_rates,
-                draft_accuracy=args.draft_accuracy,
             ),
             model_config_path=args.model_config,
             use_fp4_indexer=args.fp4_indexer,
@@ -97,7 +96,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--acceptance-rates", type=float, nargs="+",
         help="Per-position acceptance rates, e.g. 0.8 0.7 0.5 0.3"
     )
-    p.add_argument("--draft-accuracy", type=float, default=0.7)
 
     # GPU perf
     p.add_argument(

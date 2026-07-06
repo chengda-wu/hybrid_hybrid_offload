@@ -70,10 +70,9 @@ class SpeculativeDecodeConfig:
     # Acceptance mode
     accept_mode: Literal["fixed", "per_position"] = "per_position"
     acceptance_rate: float = 0.85  # used when accept_mode == "fixed"
-    acceptance_rates: list[float] | None = None  # per-position, e.g. [0.8, 0.7, 0.5, 0.3]
-
-    # Draft token quality (probability draft[i] matches ground truth)
-    draft_accuracy: float = 0.7
+    # Per-position end-to-end acceptance rate (measured on a real speculator):
+    # P(draft[i] accepted) already encodes draft correctness + verification.
+    acceptance_rates: list[float] | None = None  # e.g. [0.8, 0.7, 0.5, 0.3]
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +171,6 @@ class SimulatorConfig:
             accept_mode=spec_data.get("accept_mode", "per_position"),
             acceptance_rate=spec_data.get("acceptance_rate", 0.85),
             acceptance_rates=spec_data.get("acceptance_rates"),
-            draft_accuracy=spec_data.get("draft_accuracy", 0.7),
         )
 
         gpu_data = data.get("gpu_perf", {})

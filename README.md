@@ -53,9 +53,8 @@ python -m simulator.run [OPTIONS]
 |------|--------|------|
 | `--num-spec-tokens` | `2` | 每步 draft token 数量 **K**。设为 `0` 关闭投机解码 |
 | `--accept-mode` | `per_position` | `fixed`：所有位置使用同一接受率；`per_position`：每个位置使用 `--acceptance-rates` 中对应索引的值 |
-| `--acceptance-rate` | `0.85` | 固定接受率，仅 `--accept-mode fixed` 时生效。表示 draft 匹配 ground truth 后，额外通过采样的概率 |
-| `--acceptance-rates` | — | 逐位置接受率，空格分隔 **K 个浮点数**。如 `0.9 0.7 0.5 0.3` 表示 draft token 1 接受率 0.9、draft token 2 接受率 0.7……以此类推。仅 `--accept-mode per_position` 时生效。**长度必须 ≥ K** |
-| `--draft-accuracy` | `0.7` | draft token 本身匹配 ground truth 的概率，范围 `[0, 1]`。模拟投机模型的"推测质量"：1.0 表示 draft 永远正确，0.0 表示永远错误 |
+| `--acceptance-rate` | `0.85` | 固定接受率，仅 `--accept-mode fixed` 时生效 |
+| `--acceptance-rates` | — | 逐位置**端到端**接受率（真实 speculator 上实测），空格分隔 **K 个浮点数**。如 `0.9 0.7 0.5 0.3` 表示 draft token 1 接受率 0.9、draft token 2 接受率 0.7……以此类推。该值已包含 draft 正确性 + target 验证两个环节，无需单独指定 draft 质量。仅 `--accept-mode per_position` 时生效。**长度必须 ≥ K** |
 
 #### GPU 性能模型
 
@@ -228,14 +227,12 @@ python -m simulator.run --backend vllm --num-spec-tokens 0 \
 #   draft 位置 0 接受率 0.9, 位置 1 接受率 0.8, 位置 2 接受率 0.7
 python -m simulator.run --backend vllm --num-spec-tokens 3 \
   --accept-mode per_position --acceptance-rates 0.9 0.8 0.7 \
-  --draft-accuracy 0.9 \
   --num-requests 50 --prompt-length 256 --output-length 128 \
   --seed 42 -o spec_high.json
 
 # K=3，低接受率：模拟弱投机模型
 python -m simulator.run --backend vllm --num-spec-tokens 3 \
   --accept-mode per_position --acceptance-rates 0.5 0.3 0.1 \
-  --draft-accuracy 0.5 \
   --num-requests 50 --prompt-length 256 --output-length 128 \
   --seed 42 -o spec_low.json
 
@@ -292,8 +289,7 @@ cat > batch_experiment.json << 'EOF'
   "speculative": {
     "num_spec_tokens": 4,
     "accept_mode": "per_position",
-    "acceptance_rates": [0.9, 0.8, 0.6, 0.4],
-    "draft_accuracy": 0.85
+    "acceptance_rates": [0.9, 0.8, 0.6, 0.4]
   },
   "dataset": {
     "source": "synthetic",
