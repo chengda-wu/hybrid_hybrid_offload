@@ -69,10 +69,12 @@ class SimulatorScheduler:
         total_loaded = 0
         total_computed = 0
         total_accepted = 0
+        first_token_this_step: list[SimRequestState] = []
         for req in list(self._running.values()):
             if req.is_finished:
                 continue
 
+            had_output = req.output_length > 0
             if req.status == RequestStatus.PRE_FILL:
                 loaded, computed, accepted = self._handle_prefill(req)
             elif req.status == RequestStatus.DECODING:
@@ -84,11 +86,22 @@ class SimulatorScheduler:
             total_computed += computed
             total_accepted += accepted
 
+            # A request produces its first output token in the decode step
+            # where output_length goes 0 → >0.  Stamp TTFT after step_latency
+            # is known (below) so it includes that step's decode latency.
+            if not had_output and req.output_length > 0:
+                first_token_this_step.append(req)
+
         # 3. Simulate GPU latency for this step (aggregate over batch)
         step_latency = 0.0
         if total_computed > 0:
             step_latency = self._gpu_perf.predict(total_loaded, total_computed)
         self._sim_time += step_latency
+
+        # TTFT includes this step's decode latency (the cost of producing
+        # the first token).
+        for req in first_token_this_step:
+            req.first_token_time = self._sim_time
 
         # 4. Record per-step metrics (skip warmup steps).
         if self._step > self._warmup:
@@ -246,9 +259,8 @@ class SimulatorScheduler:
         req.num_rejected_spec_tokens += num_rejected
         req.num_decode_steps += 1
 
-        # 9. Timing
-        if req.first_token_time is None and req.output_length > 0:
-            req.first_token_time = self._sim_time
+        # TTFT is stamped by step() after step_latency is added to sim_time,
+        # so it includes the decode cost of producing the first token.
 
         # 10. Check stop
         if req.output_length >= req.max_output_tokens:
