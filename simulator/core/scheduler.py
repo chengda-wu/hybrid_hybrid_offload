@@ -147,10 +147,16 @@ class SimulatorScheduler:
             new_computed_blocks=blocks,
         )
         if allocated is None:
-            # Cannot allocate — leave in PRE_FILL to retry next step
-            if self._verbose:
-                print(f"  [{req.request_id}] prefill allocation failed, retrying")
-            return 0, 0, 0
+            # Whole-prompt prefill must fit in one step (no chunked prefill by
+            # design). If it never fits, retrying forever would hang the loop.
+            # Fail loudly so the user increases num_kv_cache_blocks.
+            raise RuntimeError(
+                f"Cannot allocate KV cache for prefill of request {req.request_id}: "
+                f"needs {num_new_tokens} new tokens "
+                f"(prompt={req.num_tokens}, cache_hit={num_computed}) "
+                f"with only {self._backend.num_free_blocks} free blocks. "
+                f"Increase --num-kv-blocks or reduce prompt length."
+            )
 
         req.allocated_blocks = allocated
         req.num_computed_tokens = req.num_tokens
