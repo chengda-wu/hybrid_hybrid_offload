@@ -104,6 +104,14 @@ class TestSchedulerE2E(unittest.TestCase):
         self.assertIsNotNone(report.avg_acceptance_rate)
         self.assertGreaterEqual(report.avg_acceptance_rate, 0.0)
         self.assertLessEqual(report.avg_acceptance_rate, 1.0)
+        # throughput and per-position rates are well-formed
+        self.assertGreater(report.tokens_per_second, 0.0)
+        self.assertEqual(len(report.per_position_acceptance_rates), 2)
+        for r in report.per_position_acceptance_rates:
+            self.assertGreaterEqual(r, 0.0)
+            self.assertLessEqual(r, 1.0)
+        # wall-clock field present (renamed from total_sim_time_ms)
+        self.assertGreaterEqual(report.wall_clock_sim_time_ms, 0.0)
 
     @requires_sglang
     def test_sglang_spec_on_completes(self):
@@ -114,6 +122,12 @@ class TestSchedulerE2E(unittest.TestCase):
         self.assertIsNotNone(report.avg_acceptance_rate)
         self.assertGreaterEqual(report.avg_acceptance_rate, 0.0)
         self.assertLessEqual(report.avg_acceptance_rate, 1.0)
+        self.assertGreater(report.tokens_per_second, 0.0)
+        self.assertEqual(len(report.per_position_acceptance_rates), 2)
+        for r in report.per_position_acceptance_rates:
+            self.assertGreaterEqual(r, 0.0)
+            self.assertLessEqual(r, 1.0)
+        self.assertGreaterEqual(report.wall_clock_sim_time_ms, 0.0)
 
     # ---- spec-off: must NOT hang (regression: bonus-token bug) ----
 
@@ -122,15 +136,19 @@ class TestSchedulerE2E(unittest.TestCase):
         report = _run("vllm", num_spec_tokens=0)
         self.assertEqual(report.total_requests, 3)
         self.assertGreater(report.total_tokens_generated, 0)
+        self.assertGreater(report.tokens_per_second, 0.0)
         # spec off → no spec tokens evaluated → None (not 0.0)
         self.assertIsNone(report.avg_acceptance_rate)
+        self.assertEqual(report.per_position_acceptance_rates, [])
 
     @requires_sglang
     def test_sglang_spec_off_completes_without_hang(self):
         report = _run("sglang", num_spec_tokens=0)
         self.assertEqual(report.total_requests, 3)
         self.assertGreater(report.total_tokens_generated, 0)
+        self.assertGreater(report.tokens_per_second, 0.0)
         self.assertIsNone(report.avg_acceptance_rate)
+        self.assertEqual(report.per_position_acceptance_rates, [])
 
     # ---- prefill OOM: must raise, not hang (regression) ----
 

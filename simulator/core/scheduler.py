@@ -282,7 +282,7 @@ class SimulatorScheduler:
             if self._verbose:
                 print(f"  [{req.request_id}] decode alloc failed, skipping step")
             req.clear_spec_tokens()
-            return loaded, 0, 0
+            return loaded, 0, 0, 0
 
         req.allocated_blocks = allocated
 

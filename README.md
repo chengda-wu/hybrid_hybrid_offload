@@ -114,7 +114,7 @@ python -m simulator.run [OPTIONS]
   "max_waiting_queue_length": 19,          // 最大等待队列长度
   "cache_hit_rate": 0.475,                 // prefix cache 命中率
   "avg_cache_usage": 0.092,                // 平均 cache 利用率
-  "avg_acceptance_rate": 0.433,            // 投机解码平均接受率（聚合值）
+  "avg_acceptance_rate": 0.433,            // 投机解码平均接受率 = total_accept/(total_accept+total_reject)，即每个 draft 的接受概率（条件率视角，排除越界 draft；与下方 per_position 的边际率口径A不同，不可直接对比）
   "per_position_acceptance_rates": [0.9, 0.8, 0.7, 0.6],  // 逐位置边际接受率（口径A：分母=所有 spec-decode step；长序列应复现输入，短序列因 EOS 附近 draft 越界后段会偏低）
   "total_requests": 20,                    // 请求总数
   "total_tokens_generated": 1280,          // post-warmup 完成请求的总输出 token 数（工作量计数）
