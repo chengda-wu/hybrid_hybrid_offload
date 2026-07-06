@@ -65,7 +65,7 @@ DSV4 默认 `cache_dtype=fp8_ds_mla`，由 `_resolve_dsv4_kv_cache_dtype`（`att
 
 ### per-token 字节数的含义
 
-- **584**（`kv_cache_interface.py:383,610`）：fp8_ds_mla 布局 = `448B NoPE + 128B RoPE + 8B fp8 scale`。SWA(#1) 和主MLA(#4,#5) 用此。
+- **584**（`kv_cache_interface.py:383,610`，`test_fused_deepseek_v4_qnorm_rope_kv_insert.py:45`）：fp8_ds_mla 布局 = `448B NoPE + 128B RoPE + 8B fp8 scale`。这是**混合精度打包**：NoPE 部分 448 element × 1B (fp8) = 448B；RoPE 部分 64 element × 2B (bf16) = 128B（RoPE 需更高精度）；+ 8B scale。故 `head_dim=512 = nope(448)+rope(64)` 与 584B 自洽。SWA(#1) 和主MLA(#4,#5) 用此。
 - **132**（`attention.py:729`）：indexer K = `head_dim = 128 + 128//128×4 = 128 fp8 数据 + 4B fp32 scale`。
 - **8,192 / 4,096 / 2,048**（`compressor.py:241`）：compressor state = `state_dim × fp32`，`state_dim = 2 × coff × head_dim`，`coff = 1 + (cr==4)`：
   - C4 主(#2)：`coff=2`，`state_dim=2×2×512=2048` → 8,192B
@@ -256,24 +256,30 @@ backing[ offset(L_region) + slot_idx(L)×ps(L) + block_id × 1,039,680
 
 ### 4.4 整个 pool（竖向 = block_id，横向 = region）
 
+以 §7.2 中 A 请求的分配为例（block 0 是 `null_block`，A 从 block 1 起）：
+
 ```
                   region→   37,440区              8,640区        1,728区
                             (C4主MLA/C4comp/C128comp/SWA)  (indexer+idxcomp)  (C128主MLA)
- blk #0  (G0拥有)           │C4主MLA    │        │C4idx█│       │C128mla█│  ← G0 跨3个region
- blk #1  (G0拥有)           │C4主MLA    │        │C4idx█│       │C128mla█│     填自己 slot
- blk #2  (G1拥有)           │ SWA(G1)   │        │ (空) │       │ (空)   │  ← 只填本组 slot
- blk #22 (G1拥有)           │ SWA(G1)   │        │ (空) │       │ (空)   │
- blk #23 (G2拥有)           │ SWA(G2)   │        │ (空) │       │ (空)   │  ← G2 的 SWA 也
- blk #44 (G3拥有)           │C4comp +   │        │C4idxc│       │ (空)   │     在 37440 区,
-                            │ idxcomp   │        │(8640)│       │        │     但不同物理块
- blk #65 (G4拥有)           │ C128comp  │        │ (空) │       │ (空)   │
+ blk #0  null_block         │ (占位)    │        │ (空) │       │ (空)   │  ← 保留，不归任何 group
+ blk #1  (G0拥有)           │C4主MLA×21 │        │C4idx×21│     │C128mla×20│  ← G0 跨3个region
+ blk #2  (G0拥有)           │C4主MLA×21 │        │C4idx×21│     │C128mla×20│     填全部层 slot
+ blk #3  (G1拥有)           │ SWA(G1)×22│        │ (空) │       │ (空)   │  ← 只填 37440 区
+ blk #10 (G1拥有)           │ SWA(G1)×22│        │ (空) │       │ (空)   │
+ blk #11 (G2拥有)           │ SWA(G2)×21│        │ (空) │       │ (空)   │  ← G2 的 SWA 也在
+ blk #19 (G3拥有)           │C4comp×21  │        │C4idxc×21│    │ (空)   │     37440 区, 但不同
+ blk #147(G4拥有)           │C128comp×20│        │ (空) │       │ (空)   │     物理 block
         ...
  block_id 命名空间 0..num_blocks-1 共享；同一时刻每个 id 只归一个 group
 ```
 
+> 上图按 §7.2 A 的分配顺序标注 id（G0:1-2, G1:3-10, G2:11-18, G3:19-146, G4:147-210）。多请求并发时各 group 的 id 会交错，但"同一时刻一个 block 只归一个 group"不变。
+>
 > **关键**：G1(SWA-A) 和 G2(SWA-B) 的 SWA 层都在 37440 区的**同一 slot 位置**（视图 offset 相同），但写入**不同物理 block**——G1 拥有的 block 和 G2 拥有的 block 是不同 id。这正是跨组共享 slot 安全的核心（§4.5）。
 >
-> G0(MLA) 同时占用 37440 区（C4主MLA）、8640 区（C4 indexer）、1728 区（C128主MLA）三个 region 的对应 slot——因为 MLA 组内含 3 种 page_size 的层。G0 拥有的一个物理块，在三个 region 都填自己 slot 的数据。
+> G0(MLA) 同时占用 37440 区（C4主MLA×21）、8640 区（C4 indexer×21）、1728 区（C128主MLA×20）三个 region——因为 MLA 组内含 3 种 page_size 的层。G0 拥有的一个物理块，在三个 region 都填自己全部层的 slot（共 62 层）。
+>
+> **block 0 是 `null_block`**（`block_pool.py:191`），保留给 SWA 窗口外占位等用途，不归任何 group，不计 ref_cnt。
 
 ### 4.5 跨组共享 slot 为何安全（核心 invariant）
 
