@@ -17,7 +17,7 @@ $$
 
 1. **当前 token 在这一层的输入**，即 $h_N^{(\ell-1)}$
 
-2. **SWA 窗口内的历史 attention 状态**，即 $\{KV_t^{(\ell)}\}_{t \in \mathcal{W}_N}$
+2. **SWA 窗口内的历史 attention 状态**，即 $\left\{KV_t^{(\ell)}\right\}_{t \in \mathcal{W}_N}$
 
 下面将以一个 $L=4$, $W=2$ 的例子来说明各个方案的存储与计算。
 
@@ -27,7 +27,7 @@ $$
 
 1. 从底向上计算位置 $N$ 的表示，得到 $h_N^{(0)}, h_N^{(1)}, \dots$
 2. 到达第 $\ell$ 层时，用 $h_N^{(\ell-1)}$ 生成当前位置的 query
-3. 读取第 $\ell$ 层窗口内缓存的 full K/V：$\{KV_t^{(\ell)}\}_{t \in \mathcal{W}_N}$
+3. 读取第 $\ell$ 层窗口内缓存的 full K/V：$\left\{KV_t^{(\ell)}\right\}_{t \in \mathcal{W}_N}$
 4. 完成该层 attention 和后续子层，得到 $h_N^{(\ell)}$
 5. 重复直到第 $L$ 层，得到 $h_N^{(L)}$
 
@@ -102,7 +102,7 @@ $$
 预测 $\text{token}_{N+1}$ 时，每一层最终仍然只需要窗口内状态：
 
 $$
-\{KV_t^{(\ell)}\}_{t \in \mathcal{W}_N}
+\left\{KV_t^{(\ell)}\right\}_{t \in \mathcal{W}_N}
 $$
 
 为了得到第 $\ell$ 层、窗口内位置 $t$ 的 $KV_t^{(\ell)}$，系统需要先得到该位置上一层的 hidden state $h_t^{(\ell-1)}$。而 $h_t^{(\ell-1)}$ 又依赖更低层对位置 $t$ 的 SWA 窗口计算。完全重算因此会形成一个向低层、向更早 token 扩张的依赖锥。
@@ -179,7 +179,7 @@ $$
 执行路径可以写成：
 
 1. 为高层缺失段确定需要恢复的窗口位置集合
-2. 将这些位置从输入侧推到第 $m$ 层，得到 $\{h_t^{(m)}\}_{t\in R_m}$
+2. 将这些位置从输入侧推到第 $m$ 层，得到 $\left\{h_t^{(m)}\right\}_{t\in R_m}$
 3. 用这些第 $m$ 层 hidden states 继续恢复第 $m+1,\dots,L$ 层的窗口状态
 4. 逐层得到最终的 $h_N^{(L)}$，并预测 $\text{token}_{N+1}$
 
