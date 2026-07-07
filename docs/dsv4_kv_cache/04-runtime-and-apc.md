@@ -53,20 +53,23 @@ num_skipped_blocks    = num_skipped_tokens // block_size
 
 | 阶段 | `n`（已算完） | `num_skipped_tokens` | 后果 |
 |------|--------------|---------------------|------|
-| **prefill**（请求刚到，无命中） | 0 | `max(0, 0-sw+1) = 0` | **不 skip**：整个 prompt 全分配真实 block，0 个 null。即使 prompt=512 > sw=128 也不释放——"还没算过任何 token"，skip 公式无从触发 |
-| **decode step 1**（prefill 算完后） | 512 | `max(0,512-128+1) = 385` | **开始 skip**：窗口外的 block 在 `remove_skipped_blocks` 里被释放成 null |
+| **prefill 无命中**（请求刚到） | 0 | `max(0, 0-sw+1) = 0` | **不 skip**：整个 prompt 全分配真实 block，0 个 null。即使 prompt=512 > sw=128 也不释放——"还没算过任何 token"，skip 公式无从触发 |
+| **prefill 有命中 H**（APC 命中 H token） | H | `max(0, H-sw+1)` | `n=H`（**不是 0**），分配侧算出 skip>0，但此时 block table 为空（命中块尚未写入）→ `remove_skipped_blocks` 早退不释放。窗口外 null 由**命中侧**预填（见下表及 §6.1(2)） |
+| **decode step 1**（prefill 算完后） | 512 | `max(0,512-128+1) = 385` | **开始 skip**：窗口外的 block 在 `remove_skipped_blocks` 里被释放成 null（block table 非空，真正释放） |
 | **decode step k** | 512 + (k-1) | 每步 +1 | skip_tokens 单调增；skip_blocks 只在跨 block 边界时才新增 null |
+
+> **prefill + 命中的时序**（决定性）：`allocate_slots` 内部先 L400 `remove_skipped_blocks(n=H)`，**后** L430 `allocate_new_computed_blocks` 才把命中块写入 `req_to_blocks`。故 `remove_skipped_blocks` 面对的 block table 为空，`_remove_blocks_in_range`（`single_type_kv_cache_manager.py:491`）`if request_id not in self.req_to_blocks: return` 早退——分配侧此步**一个 block 都不释放**。窗口外的 null 占位全部来自命中侧 `find_longest_cache_hit` 的预填。§7.3 的 B 即此场景（H=256），其 G1 table `[0,0,5,6,212-215]` 前 2 个 null 是命中侧预填，非分配侧释放。
 
 实测对比（A = 512 token prompt，无 prefix 命中）：
 
 | 阶段 | `n` | skip_tokens | G1 (bs64,sw128) | G3 (bs4,sw8) | G4 (bs8,sw128) |
 |------|-----|-------------|-----------------|--------------|----------------|
-| prefill | 0 | 0 | real=8, null=0 | real=128, null=0 | real=64, null=0 |
+| prefill 无命中 | 0 | 0 | real=8, null=0 | real=128, null=0 | real=64, null=0 |
 | decode step 1 | 512 | 385 | real=3, null=6 | real=3, null=126 | real=17, null=48 |
 
 > decode step 1 的 real 数 = 窗口内残留 block + 1 个新 decode block：G1 `cdiv(128,64)=2` 残留 +1 = 3；G3 `cdiv(8,4)=2` +1 = 3；G4 `cdiv(128,8)=16` +1 = 17。null 数 = prompt block 数 − 残留 block 数（G1 `8−2=6`、G3 `128−2=126`、G4 `64−16=48`）。
 >
-> **结论：SWA 的 KV 内存节省是 decode 稳态属性，不是 prefill 属性。** prefill 阶段窗口外的 KV 暂时全量保留（"多分配"），要等到 decode 第一步 `remove_skipped_blocks` 才被释放。
+> **结论：SWA 的 KV 内存节省是 decode 稳态属性，不是 prefill 属性。** prefill 阶段窗口外的 KV 暂时全量保留——无命中时全分配真实 block（n=0 不释放），有命中时分配侧也释放不了（block table 空，n=H 仅驱动命中侧预填 null）。要等到 decode 第一步 `remove_skipped_blocks` 才真正释放窗口外 block。
 
 下面三层都围绕"`n` = 已算完 token 数"展开，但每层在 prefill/decode 下的表现不同。
 
@@ -77,19 +80,21 @@ num_skipped_blocks    = num_skipped_tokens // block_size
 - block table **长度不变**：被释放的 block 用 `null_block` 占位，保持 token→block 索引关系；attention kernel 靠位置算窗口，不读 null 标记。
 - `allocate_new_blocks`（base class，`:279`）随后只为新 token 追加 block：`num_new = cdiv(num_tokens, bs) - len(req_blocks)`，因 `len(req_blocks)` 含 null 占位，不会因 skip 多分配。
 
-**prefill 时此函数仍被调用，但 `n=0` → `skip_blocks=0` → 一个 block 都不释放**（上表第一行）；decode 时 `n>sw` 才真正释放（上表第二行）。这是"分配侧只有 decode 才 skip"的来源。
+**分配侧真正释放 block 的前提是 block table 非空**：`_remove_blocks_in_range`（`:491`）`if request_id not in self.req_to_blocks: return` 早退。故 prefill 无命中时 `n=0 → skip_blocks=0`（不释放）；prefill 有命中时 `n=H` 算出 skip>0 但 block table 为空（命中块尚未写入）也早退（不释放）；只有 decode 时 block table 非空且 `n>sw` 才真正释放。这是"分配侧只有 decode 才 skip"的来源。
 
 #### (2) 命中侧 —— 连续 block 命中（APC 查找）
 
-`SlidingWindowManager.find_longest_cache_hit`（`single_type_kv_cache_manager.py:688`）与分配侧用同一个 `get_num_skipped_tokens`，但实现不同：
+`SlidingWindowManager.find_longest_cache_hit`（`single_type_kv_cache_manager.py:688`）**不调用 `get_num_skipped_tokens`**，而是用独立的连续命中逻辑：
 
 1. 先把整个候选命中区间 `[0, max_num_blocks)` **全部预填 `null_block`**（`:718`）。
-2. 需连续 `cdiv(sliding_window - 1, block_size)` 个真实 block 命中才算 hit（`_contiguous_blocks_for_hit:675,678`）——窗口必须完整覆盖这么多 block 才能复用。
-3. **从右往左**扫描，找到连续命中后 trim 掉右侧多余 null，**左侧的 null 全部保留**作为窗口外占位。
+2. 需连续 `cdiv(sliding_window - 1, block_size)` 个真实 block 命中才算 hit（`_contiguous_blocks_for_hit:675,678`，即 `cdiv(sw-1, bs)`）——窗口必须完整覆盖这么多 block 才能复用。
+3. **从右往左**扫描 hashmap（`:725`），找到连续命中后 trim 掉右侧多余 null，**左侧的 null 全部保留**作为窗口外占位。
 
 命中块序列 = 若干 `null_block`（窗口外）+ 窗口内真实 block。null 数 = `命中块数 − cdiv(sw-1, bs)`，详见 §7.3 推导表。
 
-**此侧只对"有 prefix 命中"的请求生效**（如 §7.3 的 B，命中 256 token）。全新 prefill（无命中）走不到这里。命中侧与分配侧算的是同一个 `n`、同一个 `get_num_skipped_tokens`，两侧的 null 语义一致、互不矛盾——分配侧释放窗口外 block 成 null，命中侧预填窗口外 null，都是"窗口外用 null_block 占位"。
+**此侧只对"有 prefix 命中"的请求生效**（如 §7.3 的 B，命中 256 token）。全新 prefill 无命中走不到这里。
+
+> **命中侧 vs 分配侧：公式不同，但 block 对齐时数值相等。** 命中侧用 `cdiv(sw-1, bs)` 连续命中（不调 `get_num_skipped_tokens`），分配侧用 `get_num_skipped_tokens(n)//bs = max(0,n-sw+1)//bs`。两者是不同代码路径，但命中总按 block 对齐（`H = k·bs`），此时 `H//bs − cdiv(sw-1,bs) = (H−sw+1)//bs`——命中侧 null 数恰等于分配侧 skip_blocks。故 §7.3 的 null 数推导两种算法都自洽。两侧的 null 语义一致：分配侧"释放窗口外 block 成 null"，命中侧"预填窗口外 null"，都是"窗口外用 `null_block` 占位"。prefill+命中时只有命中侧的 null 生效（分配侧因 block table 空而 no-op）。
 
 #### (3) 计算侧 —— triton kernel 只 gather 窗口内 KV（prefill 与 decode 都生效）
 
@@ -111,13 +116,13 @@ start_pos = max(pos - window_size + 1, 0)     # sparse_swa.py:644
 
 #### 三层的关系
 
-| 层面 | 作用对象 | skip 触发条件 | prefill 是否 skip | 用 null_block? |
-|------|---------|--------------|------------------|---------------|
-| 分配侧 `remove_skipped_blocks` | block table（释放窗口外 block） | `n=num_computed_tokens > sw` | **否**（`n=0`） | 是，替换被释放 block |
-| 命中侧 `find_longest_cache_hit` | APC 命中块序列 | 有 prefix 命中即可 | 否（全新请求无命中） | 是，预填窗口外占位 |
-| 计算侧 triton kernel | attention 的 KV gather | 按 query 位置 `pos`，恒生效 | **是**（按位置） | 否，靠 `pos` 算窗口，null 位置被 mask |
+| 层面 | 作用对象 | skip 触发条件 | 公式 | prefill 无命中 | prefill 有命中 | decode |
+|------|---------|--------------|------|---------------|---------------|--------|
+| 分配侧 `remove_skipped_blocks` | block table（释放窗口外 block） | `n>sw` **且 block table 非空** | `max(0,n-sw+1)//bs` | 不 skip（n=0） | 算出 skip 但 table 空→早退不释放 | **真正释放** |
+| 命中侧 `find_longest_cache_hit` | APC 命中块序列 | 有 prefix 命中 | `cdiv(sw-1,bs)` 连续命中 | 不触发（无命中） | **预填窗口外 null** | 不触发（decode 不查 APC） |
+| 计算侧 triton kernel | attention 的 KV gather | 按 query 位置 `pos`，恒生效 | `max(pos-sw+1,0)` | **skip**（按位置） | **skip**（按位置） | **skip**（按位置） |
 
-分配/命中侧用"窗口 = `[n - sw + 1, n]`"（`n` = 已算完 token），计算侧用"`[pos-sw+1, pos]`"（`pos` = query 位置）。三层分别管**内存释放**、**prefix 命中**、**计算 gather**，prefill/decode 下只有计算侧恒 skip，另两侧要等 decode（或等命中）才 skip。null_block 是分配侧/命中侧的 block table 占位手段，计算侧不依赖它。
+三层分别管**内存释放**、**prefix 命中**、**计算 gather**，用各自独立的公式（分配侧 `max(0,n-sw+1)//bs`、命中侧 `cdiv(sw-1,bs)`、计算侧 `max(pos-sw+1,0)`），block 对齐时分配侧与命中侧数值相等。prefill 无命中时三层中只有计算侧 skip；prefill 有命中时计算侧 skip + 命中侧预填 null（分配侧 no-op）；decode 时计算侧 skip + 分配侧真正释放。null_block 是分配侧/命中侧的 block table 占位手段，计算侧不依赖它。
 
 ---
 
