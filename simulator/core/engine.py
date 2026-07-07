@@ -128,6 +128,17 @@ class SimulationEngine:
         while self._scheduler.step():
             pass
 
+        # Report aggregate step-latency clamp stats (the per-step clamp warns
+        # once; this gives the full count + worst overshoot without per-step
+        # spam).  Omitted when nothing was clamped.
+        cap_count, cap_max = self._gpu_perf.cap_stats
+        if cap_count > 0:
+            print(
+                f"GPU perf: {cap_count} step(s) clamped to "
+                f"{self._gpu_perf.MAX_STEP_LATENCY_MS:.0f} ms cap "
+                f"(max predicted {cap_max:.1f} ms)"
+            )
+
         # Compute and return report
         stats = StatisticsComputer()
         return stats.compute(

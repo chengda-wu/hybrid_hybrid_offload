@@ -66,6 +66,8 @@ class GPUPerfModel:
         self._fitted = False
         self._warned_negative = False
         self._warned_cap = False
+        self._cap_count = 0
+        self._cap_max_predicted = 0.0
         self._fit()
 
     def _fit(self) -> None:
@@ -180,16 +182,18 @@ class GPUPerfModel:
             + self._d
         )
         if latency > self.MAX_STEP_LATENCY_MS:
+            self._cap_count += 1
+            if latency > self._cap_max_predicted:
+                self._cap_max_predicted = latency
             if not self._warned_cap:
                 import logging
                 _log = logging.getLogger(__name__)
                 _log.warning(
                     "GPU perf model predicted latency %.2f ms (> cap %.1f ms) "
-                    "for loaded=%d computed=%d — clamped to cap.  The "
-                    "interaction term c·m·n grows unboundedly at scale; the "
-                    "cap models the physical ceiling of a single GPU forward "
-                    "pass and prevents congestion snowball.  (This warning is "
-                    "printed once.)",
+                    "for loaded=%d computed=%d — clamped to cap.  The interaction "
+                    "term c·m·n grows unboundedly at scale; the cap models the "
+                    "physical ceiling of a single GPU forward pass.  (Further "
+                    "clamps are counted silently; final count reported at end.)",
                     latency, self.MAX_STEP_LATENCY_MS,
                     loaded_tokens, computed_tokens,
                 )
@@ -214,3 +218,12 @@ class GPUPerfModel:
     def coefficients(self) -> tuple[float, float, float, float]:
         """Return (a, b, c, d)."""
         return (self._a, self._b, self._c, self._d)
+
+    @property
+    def cap_stats(self) -> tuple[int, float]:
+        """Return (num_clamped_steps, max_predicted_latency_ms_before_clamp).
+
+        For end-of-run reporting: the first clamp warns once (see predict),
+        and these counters give the aggregate picture without per-step spam.
+        """
+        return (self._cap_count, self._cap_max_predicted)
