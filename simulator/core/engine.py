@@ -139,6 +139,14 @@ class SimulationEngine:
                 f"(max predicted {cap_max:.1f} ms)"
             )
 
+        # Per-pool peak utilization (SGLang only — vLLM has one shared pool).
+        # End-state usage is ~0 (requests free on finish), so the peak is the
+        # informative number: shows which pool nearly OOM'd first.
+        peak = self._backend.pool_peak_detail()
+        if peak:
+            parts = [f"{name} {ratio * 100:.1f}%" for name, ratio in peak]
+            print(f"KV pool peak usage: {', '.join(parts)}")
+
         # Compute and return report
         stats = StatisticsComputer()
         return stats.compute(

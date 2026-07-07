@@ -115,6 +115,11 @@ class SGLangBackend(KVBackend):
             sglang_cfg.c128_tokens,
         ]
         self._pool_used = [0, 0, 0]  # [swa, c4, c128] slots used
+        # Peak per-pool utilization observed over the run (high-water mark of
+        # _pool_used[i] / _pool_caps[i]).  End-state usage is ~0 (requests free
+        # on finish), so the peak is the informative number for diagnosing
+        # which pool bottlenecks first (e.g. SWA ring vs c128 full KV).
+        self._pool_peak: list[int] = [0, 0, 0]
         arch = backend_config.model_arch
         self._swa_per_tok = arch.num_layers
         self._c4_per_tok = (sum(1 for cr in (arch.compress_ratios or []) if cr == 4) * 2)
@@ -253,6 +258,11 @@ class SGLangBackend(KVBackend):
         self._pool_used[0] += swa_need
         self._pool_used[1] += c4_need
         self._pool_used[2] += c128_need
+        # Update peak (allocs are the only place usage rises; frees/reclaims
+        # only lower it, so checking here captures the high-water mark).
+        for i in range(3):
+            if self._pool_used[i] > self._pool_peak[i]:
+                self._pool_peak[i] = self._pool_used[i]
         # Bill this request's SWA charged-token count (prefix-hit tokens are
         # not billed — they were a cache hit, not a fresh allocation).
         sim_req.swa_charged_tokens += to_alloc
@@ -449,10 +459,31 @@ class SGLangBackend(KVBackend):
     @property
     def usage(self) -> float:
         # Average of three-pool utilization
-        ratios = []
-        for used, cap in zip(self._pool_used, self._pool_caps):
-            ratios.append(used / cap if cap > 0 else 0.0)
+        ratios = [r for _, r in self.pool_usage_detail()]
         return sum(ratios) / len(ratios) if ratios else 0.0
+
+    def pool_usage_detail(self) -> list[tuple[str, float]]:
+        # Per-pool utilization (swa/c4/c128).  Caps differ by orders of
+        # magnitude (SWA ring-bounded vs full KV), so the per-pool numbers
+        # are more informative than the aggregate ``usage`` — e.g. SWA
+        # nearing 1.0 while c128 is near 0 signals an SWA-pool bottleneck.
+        detail = []
+        for name, used, cap in zip(
+            self._pool_names, self._pool_used, self._pool_caps
+        ):
+            detail.append((name, used / cap if cap > 0 else 0.0))
+        return detail
+
+    def pool_peak_detail(self) -> list[tuple[str, float]] | None:
+        # Peak per-pool utilization over the run.  More useful than the
+        # instantaneous pool_usage_detail at end-of-run (which is ~0 after
+        # requests free) for diagnosing which pool nearly OOM'd.
+        detail = []
+        for name, peak, cap in zip(
+            self._pool_names, self._pool_peak, self._pool_caps
+        ):
+            detail.append((name, peak / cap if cap > 0 else 0.0))
+        return detail
 
     @property
     def num_free_blocks(self) -> int:

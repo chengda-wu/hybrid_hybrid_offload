@@ -136,6 +136,25 @@ class KVBackend(ABC):
         """Current cache utilization ratio [0, 1]."""
         ...
 
+    def pool_usage_detail(self) -> list[tuple[str, float]] | None:
+        """Per-pool utilization for backends with multiple physical pools.
+
+        Returns a list of (pool_name, utilization_ratio) for backends that
+        split KV cache across independent pools (SGLang: swa/c4/c128), or
+        None for single-pool backends (vLLM shared block pool).  Used for
+        end-of-run diagnostics; ``usage`` is the single aggregated number.
+        """
+        return None
+
+    def pool_peak_detail(self) -> list[tuple[str, float]] | None:
+        """Peak per-pool utilization over the run, or None for single-pool.
+
+        More informative than ``pool_usage_detail`` at end-of-run (which is
+        ~0 after requests free): shows which pool nearly OOM'd.  Backends
+        without per-pool tracking return None.
+        """
+        return None
+
     @property
     @abstractmethod
     def total_bytes(self) -> int:
