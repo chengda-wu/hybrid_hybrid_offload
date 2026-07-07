@@ -29,7 +29,20 @@ class GPUPerfModel:
     - Memory bandwidth costs (loaded_tokens: attention over cached KV)
     - Compute costs (computed_tokens: QKV projections + attention)
     - Interaction between cached and new tokens
+
+    Per-step latency is capped at ``MAX_STEP_LATENCY_MS``: a single GPU
+    forward pass on one device has a physical ceiling, and the interaction
+    term ``c·m·n`` grows without bound as loaded×computed scales up under
+    high concurrency.  Without a cap, a large batch triggers a positive
+    feedback loop (slow step → queue grows → bigger batch → even slower
+    step) that snowballs wall-clock time.  The cap models the real-world
+    fact that a single forward cannot run arbitrarily long — the scheduler
+    would chunk it or the GPU would hit a fixed compute bound — and keeps
+    the simulation tractable for long-sequence / high-concurrency workloads.
     """
+
+    # Ceiling on a single step's predicted latency (ms).  See class docstring.
+    MAX_STEP_LATENCY_MS: float = 50.0
 
     DEFAULT_DATA: list[PerfDataPoint] = [
         PerfDataPoint(0, 1, 0.8),         # single token decode, no cache
@@ -52,6 +65,7 @@ class GPUPerfModel:
         self._d: float = 0.0
         self._fitted = False
         self._warned_negative = False
+        self._warned_cap = False
         self._fit()
 
     def _fit(self) -> None:
@@ -165,6 +179,22 @@ class GPUPerfModel:
             + self._c * loaded_tokens * computed_tokens
             + self._d
         )
+        if latency > self.MAX_STEP_LATENCY_MS:
+            if not self._warned_cap:
+                import logging
+                _log = logging.getLogger(__name__)
+                _log.warning(
+                    "GPU perf model predicted latency %.2f ms (> cap %.1f ms) "
+                    "for loaded=%d computed=%d — clamped to cap.  The "
+                    "interaction term c·m·n grows unboundedly at scale; the "
+                    "cap models the physical ceiling of a single GPU forward "
+                    "pass and prevents congestion snowball.  (This warning is "
+                    "printed once.)",
+                    latency, self.MAX_STEP_LATENCY_MS,
+                    loaded_tokens, computed_tokens,
+                )
+                self._warned_cap = True
+            latency = self.MAX_STEP_LATENCY_MS
         if latency < 0:
             if not self._warned_negative:
                 import logging

@@ -26,9 +26,9 @@ class SyntheticConfig:
     prompt_length_min: int = 64
     prompt_length_max: int = 2048
     output_length_dist: Literal["fixed", "uniform"] = "fixed"
-    output_length_fixed: int = 256
+    output_length_fixed: int = 512
     output_length_min: int = 32
-    output_length_max: int = 512
+    output_length_max: int = 1024
 
     # Controllable prefix overlap for cache hit rate experiments.
     # Fraction of each request's prompt that reuses the previous request's prefix.
@@ -156,9 +156,9 @@ class SimulatorConfig:
                 prompt_length_min=synthetic_data.get("prompt_length_min", 64),
                 prompt_length_max=synthetic_data.get("prompt_length_max", 2048),
                 output_length_dist=synthetic_data.get("output_length_dist", "fixed"),
-                output_length_fixed=synthetic_data.get("output_length_fixed", 256),
+                output_length_fixed=synthetic_data.get("output_length_fixed", 512),
                 output_length_min=synthetic_data.get("output_length_min", 32),
-                output_length_max=synthetic_data.get("output_length_max", 512),
+                output_length_max=synthetic_data.get("output_length_max", 1024),
                 shared_prefix_ratio=synthetic_data.get("shared_prefix_ratio", 0.5),
                 shared_prefix_length=synthetic_data.get("shared_prefix_length"),
             ),

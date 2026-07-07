@@ -85,7 +85,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Dataset
     p.add_argument("--num-requests", type=int, default=100)
     p.add_argument("--prompt-length", type=int, default=512)
-    p.add_argument("--output-length", type=int, default=256)
+    p.add_argument("--output-length", type=int, default=512)
     p.add_argument("--shared-prefix-ratio", type=float, default=0.5)
 
     # Speculative decode
