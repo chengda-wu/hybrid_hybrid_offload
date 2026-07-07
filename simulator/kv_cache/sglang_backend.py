@@ -123,6 +123,11 @@ class SGLangBackend(KVBackend):
         self._pool_per_tok = [
             self._swa_per_tok, self._c4_per_tok, self._c128_per_tok,
         ]
+        # SWA sliding window (HF sliding_window; 128 for DSV4).  Real SGLang
+        # frees SWA slots once they leave the window (see
+        # _reclaim_swa_out_of_window).  Derive from arch, not a literal.
+        sw = arch.sliding_window
+        self._sliding_window = sw if sw and sw > 0 else 128
 
         # Diagnostic from the last failed allocate_slots (None when last call
         # succeeded).  SGLang fails on per-pool capacity, not total-pool free,
@@ -248,6 +253,9 @@ class SGLangBackend(KVBackend):
         self._pool_used[0] += swa_need
         self._pool_used[1] += c4_need
         self._pool_used[2] += c128_need
+        # Bill this request's SWA charged-token count (prefix-hit tokens are
+        # not billed — they were a cache hit, not a fresh allocation).
+        sim_req.swa_charged_tokens += to_alloc
 
         sim_req._allocated_indices.append(new_indices)
         self.last_alloc_failure = None
@@ -260,6 +268,52 @@ class SGLangBackend(KVBackend):
         self._pool_used[0] = max(0, self._pool_used[0] - num_tokens * self._swa_per_tok)
         self._pool_used[1] = max(0, self._pool_used[1] - num_tokens * self._c4_per_tok)
         self._pool_used[2] = max(0, self._pool_used[2] - num_tokens * self._c128_per_tok)
+
+    def _reclaim_swa_out_of_window(self, sim_req: "SGLangSimRequest") -> None:
+        """Return SWA slots outside the sliding window to the SWA sub-pool.
+
+        Mirrors real SGLang ``free_swa_out_of_window_slots`` (common.py:68),
+        called every decode step via ``ScheduleBatch._evict_swa``
+        (schedule_batch.py:2924) on DSV4's SWARadixCache + separate SWA
+        sub-pool.  Without this, ``_pool_used[0]`` grows with total sequence
+        length and OOMs far too early: a single 1100-token request bills
+        47300 SWA slots (1100×43) vs the real ~window-bounded footprint.
+
+        Cursor formula (common.py:96-105, drop_page_margin=False for radix):
+            evict_threshold = pre_len - sliding_window - page_size
+            new_cursor = max(old_cursor, page_align_floor(threshold))
+        where ``pre_len = charged - 1`` matches ``req.seqlen - 1`` on the
+        request's own positions.  Only ``_pool_used[0]`` (SWA) is decremented
+        — real ``free_swa`` returns to the SWA sub-pool only, NOT the
+        full/C4/C128 pools, so the mock flat allocator is untouched (those
+        token-indices stay allocated to the other pools).
+
+        The cursor is on the request's *charged* token positions (cumulative
+        new tokens billed: prefill num_new + decode 1+K − rejected/beyond),
+        not full-sequence positions.  A cache-hit prefill is not billed for
+        the shared prefix, so basing the cursor on charged tokens avoids
+        over-deducting the (unbilled) prefix and driving the request's SWA
+        contribution negative.
+
+        Simplifications vs real SGLang (documented):
+        - Reclaims every ``sync_state``; real gates on ``eviction_interval``
+          + ``decode_batch_idx >= 1``.  Steady-state bound is identical.
+        - No ``cache_protected_len`` floor: the charged-token cursor already
+          keeps the live window untouched (threshold < charged − window).
+        """
+        charged = sim_req.swa_charged_tokens
+        pre_len = charged - 1
+        threshold = pre_len - self._sliding_window - self._page_size
+        if threshold <= 0:
+            return
+        threshold = (threshold // self._page_size) * self._page_size
+        new_cursor = max(sim_req.swa_evicted_charged, threshold)
+        delta = new_cursor - sim_req.swa_evicted_charged
+        if delta > 0:
+            self._pool_used[0] = max(
+                0, self._pool_used[0] - delta * self._swa_per_tok
+            )
+            sim_req.swa_evicted_charged = new_cursor
 
     def set_spec_tokens(
         self, sim_req: "SGLangSimRequest", tokens: list[int]
@@ -310,6 +364,11 @@ class SGLangBackend(KVBackend):
             self._cache.inc_lock_ref(result.last_device_node)
             sim_req._last_node = result.last_device_node
 
+        # Reclaim SWA slots that left the sliding window this step (mirrors
+        # real SGLang _evict_swa → free_swa_out_of_window_slots).  Done after
+        # the radix insert so charged_tokens reflects this step's new tokens.
+        self._reclaim_swa_out_of_window(sim_req)
+
     def free_rejected_slots(
         self, sim_req: "SGLangSimRequest", num_rejected: int
     ) -> None:
@@ -348,6 +407,12 @@ class SGLangBackend(KVBackend):
                 sim_req._allocated_indices = [flat[:keep_len].clone()]
             else:
                 sim_req._allocated_indices = []
+            # Rejected/beyond tokens were billed to swa_charged_tokens in
+            # allocate_slots; drop them so the SWA reclaim cursor stays
+            # consistent with actually-held tokens.
+            sim_req.swa_charged_tokens = max(
+                0, sim_req.swa_charged_tokens - num_rejected
+            )
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Free unaligned tail indices and release lock_ref.
@@ -443,9 +508,12 @@ class SGLangBackend(KVBackend):
 
         # spec mode: draft worker scaling (pool_configurator.py:538-545),
         # applied consistently to both pool_caps (SGLangConfig) and total_bytes here.
+        # Use arch.num_layers (not a literal 43) so pool_caps and total_bytes
+        # stay consistent for non-43-layer models — matches sglang_config.py:48.
         full_tokens = blocks * scheduler_bs
         if self._num_spec_tokens > 0:
-            full_tokens = (full_tokens * 43 // 44 // page_size) * page_size
+            nl = self._backend_config.model_arch.num_layers
+            full_tokens = (full_tokens * nl // (nl + 1) // page_size) * page_size
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size
 
@@ -517,6 +585,12 @@ class SGLangSimRequest:
         "spec_token_ids",
         "_allocated_indices",
         "_last_node",
+        # SWA sliding-window reclamation cursor (see
+        # SGLangBackend._reclaim_swa_out_of_window).  Tracks this request's
+        # own charged-token positions whose SWA slots have been returned to
+        # the SWA sub-pool, mirroring real SGLang req.swa_evicted_seqlen.
+        "swa_charged_tokens",
+        "swa_evicted_charged",
     )
 
     def __init__(
@@ -529,6 +603,13 @@ class SGLangSimRequest:
         self.spec_token_ids: list[int] = []
         self._allocated_indices: list[Any] = []
         self._last_node: Any = None
+        # Net tokens this request is billed for in the SWA pool
+        # (prefill num_new + decode 1+K − rejected/beyond).  Cache-hit prefix
+        # is NOT billed (it lives in the shared SWARadixCache, not this
+        # request's allocation) — so the cursor is on charged positions,
+        # not full-sequence positions, to avoid over-deducting on hits.
+        self.swa_charged_tokens: int = 0
+        self.swa_evicted_charged: int = 0
 
     @property
     def num_tokens(self) -> int:

@@ -86,10 +86,17 @@ class KVBackend(ABC):
         they leak until ``free()``).
 
         SWA sliding-window reclamation is NOT handled here, and does not need
-        to be: real vLLM frees window-outside head blocks via
-        ``remove_skipped_blocks``, which is called automatically at the start of
-        every ``allocate_slots`` (kv_cache_manager.py:400-404).  So SWA
-        occupancy is modeled faithfully, not approximated.
+        to be: each backend models it directly.
+        - vLLM: ``remove_skipped_blocks`` is called automatically at the start
+          of every ``allocate_slots`` (kv_cache_manager.py:400-404), so SWA
+          head blocks outside the window are freed every step.
+        - SGLang: ``SGLangBackend._reclaim_swa_out_of_window`` (called at the
+          end of ``sync_state``) mirrors real SGLang
+          ``free_swa_out_of_window_slots`` (common.py:68, driven by
+          ``ScheduleBatch._evict_swa`` every decode step), returning
+          out-of-window SWA slots to the SWA sub-pool.  Without it the SWA
+          pool would grow with total sequence length and OOM far too early.
+        So SWA occupancy is modeled faithfully on both backends, not approximated.
 
         Per-step call chain in real vLLM (and in this simulator, which
         delegates ``allocate_slots`` straight through):
