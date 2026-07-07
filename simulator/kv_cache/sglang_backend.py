@@ -502,8 +502,17 @@ class SGLangBackend(KVBackend):
         # (ring>1), c128 overlap=False (ring>1).  Both use head_dim=512, NOT the
         # state_dim in the per-group KVGroupInfo (2048/1024) — that is a different
         # quantity.  Matches pool_configurator.py:589-596.
+        # Online compress (SGLANG_OPT_USE_ONLINE_COMPRESS) changes c128 from
+        # (kv, score) = 2*head_dim to (max, sum, kv) = 3*head_dim per slot
+        # (pool_configurator.py:593-596).  Read the real flag so total_bytes
+        # tracks SGLang when the user enables it (otherwise c128 state is
+        # undercounted by ~50%).
+        from sglang.srt.environ import envs
+        c128_online = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
         c4_state_bytes = 2 * 2 * 512 * c4_dt      # last_dim = 2*2*512 = 2048
-        c128_state_bytes = 2 * 1 * 512 * c128_dt  # last_dim = 2*1*512 = 1024
+        c128_state_bytes = (
+            (3 if c128_online else 2 * 1) * 512 * c128_dt
+        )
         idx_state_bytes = 2 * 2 * 128 * c4_dt     # indexer uses c4 dtype
 
         # spec mode: draft worker scaling (pool_configurator.py:538-545),
@@ -517,9 +526,13 @@ class SGLangBackend(KVBackend):
         swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
         swa_slots = swa_tokens // swa_page_size
 
-        def _sglang_ceil_div(size: int, page: int) -> int:
-            # SGLang's page-count idiom: ceil_div(size, page) via
-            # (size + page + 1) // page (pool_configurator / memory_pool).
+        def _sglang_page_count(size: int, page: int) -> int:
+            # SGLang's page-count idiom (deepseek_v4_memory_pool._create_buffer,
+            # pool_configurator): ``(size + page + 1) // page``.  This is NOT
+            # a standard ceil_div — the extra ``+1`` over ``ceil_div`` adds one
+            # guard page when size is page-aligned (e.g. _sglang_page_count(256,
+            # 256) = 2, not 1).  Named ``_sglang_page_count`` (not ``ceil_div``)
+            # so callers know the guard page is included.
             return (size + page + 1) // page
 
         def _pad576(raw: int) -> int:
@@ -530,7 +543,7 @@ class SGLangBackend(KVBackend):
             if info.name == "swa":
                 # SWA: pad per-page (swa_page_size * kv_bytes), then × slots × layers
                 padded_page = _pad576(swa_page_size * kv_bytes)
-                swa_pages = _sglang_ceil_div(swa_tokens, swa_page_size)
+                swa_pages = _sglang_page_count(swa_tokens, swa_page_size)
                 group_bytes = swa_pages * padded_page * info.layer_count
             elif info.name == "c4_compressor":
                 # CompressStatePool._size = ceil(size + ring + 1, ratio) * ratio
@@ -545,9 +558,16 @@ class SGLangBackend(KVBackend):
             elif info.name == "c4_indexer":
                 # DeepSeekV4IndexerPool._create_buffer: no 576 padding.
                 # pages = ceil_div(size, page_size)
+                # c4_tok = full_tokens // 4.  Real SGLang divides by
+                # (4 * c4_shrink_factor) when HiSparse is configured
+                # (pool_configurator.py:604,627), but c4_shrink_factor defaults
+                # to 1 (pool_configurator.py:525) and the simulator does not
+                # expose a HiSparse config, so //4 is correct for the default
+                # DSV4 path.  Add a c4_shrink_factor knob here if HiSparse
+                # support is needed.
                 c4_tok = full_tokens // 4
                 c4_page_tokens = info.block_size // 4  # 64
-                kv_pages = _sglang_ceil_div(c4_tok, c4_page_tokens)
+                kv_pages = _sglang_page_count(c4_tok, c4_page_tokens)
                 kv = info.layer_count * kv_pages * info.page_bytes
                 # Indexer state: same size+ring+1 rounding as compressor state
                 raw = swa_slots * c4_ring
@@ -559,7 +579,7 @@ class SGLangBackend(KVBackend):
                 # storage_bs = page_bytes // 584 (unpadded bytes / per-token bytes)
                 storage_bs = info.page_bytes // 584
                 size_tok = full_tokens // (info.block_size // storage_bs) if storage_bs else full_tokens
-                kv_pages = _sglang_ceil_div(size_tok, storage_bs)
+                kv_pages = _sglang_page_count(size_tok, storage_bs)
                 group_bytes = info.layer_count * kv_pages * _pad576(info.page_bytes)
             total += group_bytes
         return total

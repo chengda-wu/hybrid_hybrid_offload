@@ -309,7 +309,16 @@ def _build_kv_cache_groups(bc: KVBackendConfig) -> list[KVGroupInfo]:
 
     # 6. C4 Indexer (attention.py:643-655): 132 B/token
     if c4_layers:
-        # indexer: 132 B/token (fp8) or 68 B/token (fp4, deepseek_v4_memory_pool.py:279-282)
+        # Indexer per-token bytes.  SGLang: 132 (fp8) or 68 (fp4) — fp4 uses
+        # index_head_dim//2 + 4 (deepseek_v4_memory_pool.py:279-282).  vLLM:
+        # ALWAYS 132 even in fp4 mode (attention.py:725-729 — "FP4 indexer
+        # cache still allocates the same amount of memory as FP8, but only
+        # uses the first half").  This KVGroupInfo is the shared model
+        # description; its page_bytes is accurate for SGLang's total_bytes.
+        # The vLLM backend ignores it (VLLMConfig._build_vllm_specs hardcodes
+        # idx_hd=132, see vllm_config.py:101-103), so vLLM is unaffected —
+        # but do NOT use KVGroupInfo.page_bytes for cross-backend comparison
+        # of the indexer in fp4 mode.
         idx_bytes = 68 if arch.use_fp4_indexer else 132
         groups.append(KVGroupInfo("c4_indexer", 256, 64 * idx_bytes, len(c4_layers)))
 

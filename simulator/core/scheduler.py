@@ -45,6 +45,14 @@ class SimulatorScheduler:
         self._sim_time: float = 0.0  # ms
         self._warmup = config.warmup_steps  # first N steps skipped from metrics; cache NOT cleared
         self._verbose = config.verbose
+        # Stall detection: counts consecutive steps where every active request
+        # made zero progress (no prefill completed, no decode token generated).
+        # Decode alloc failure with a full KV pool and no evictable entries can
+        # otherwise loop forever — see _check_stall.  Real SGLang prevents this
+        # at admission (bounding running req count); we have no such bound, so
+        # guard the loop instead.
+        self._stall_count: int = 0
+        self._STALL_LIMIT: int = 1000
 
     # ------------------------------------------------------------------
     # Public
@@ -107,6 +115,28 @@ class SimulatorScheduler:
         # the first token).
         for req in first_token_this_step:
             req.first_token_time = self._sim_time
+
+        # Stall detection: if active requests exist but NONE advanced this
+        # step, the loop is making no progress — typically all requests
+        # failing decode alloc against a full KV pool with nothing evictable.
+        # A step progresses if it computed any tokens (a prefill completed:
+        # _handle_prefill returns num_new_tokens as computed) or generated any
+        # output (a decode produced tokens).  Bail out loudly instead of
+        # looping forever.  (Prefill alloc failure already raises RuntimeError
+        # in _handle_prefill; this catches the decode-side equivalent that
+        # silently returns zeros.)
+        active = [r for r in self._running.values() if not r.is_finished]
+        if active and total_computed == 0 and total_generated == 0:
+            self._stall_count += 1
+        else:
+            self._stall_count = 0
+        if self._stall_count >= self._STALL_LIMIT:
+            raise RuntimeError(
+                f"Scheduler stalled: {len(active)} active request(s) made no "
+                f"progress for {self._stall_count} consecutive steps (KV pool "
+                f"full, nothing evictable).  Increase --num-kv-blocks or reduce "
+                f"concurrency.  (limit={self._STALL_LIMIT})"
+            )
 
         # 4. Record per-step metrics (skip warmup steps).
         if self._step > self._warmup:
