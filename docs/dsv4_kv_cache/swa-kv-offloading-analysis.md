@@ -1,4 +1,4 @@
-# DeepSeek KV Cache 存储方案
+# SWA KV Cache 存储方案
 
 ## 1. 问题定义
 
@@ -36,7 +36,7 @@ $$
 
 
 <div align="center">
-  <img src="imgs/kv-offloading-swa-full-storage.png" alt="SWA Full KV Baseline" width="40%">
+  <img src="./imgs/kv-offloading-swa-full-storage.png" alt="SWA Full KV Baseline" width="100px">
 </div>
 
 图中的例子取 $L=4, W=2$，因此位置 $N$ 在每一层只访问窗口 $\mathcal{W}_N=\{N-1,N\}$。绿色块表示已经保存好的 full KV，橙色块表示当前位置 $N$ 沿层向上计算得到的 hidden state。虚线框表示当前 decode step 需要计算的，实线框表示已经缓存并可直接读取的。
@@ -112,7 +112,7 @@ $$
 ### 示例
 
 <div align="center">
-  <img src="imgs/kv-offloading-swa-full-recompute.png" alt="SWA Full KV Baseline" width="40%">
+  <img src="./imgs/kv-offloading-swa-full-recompute.png" alt="SWA Full KV Baseline" width="300px">
 </div>
 
 仍取 $L=4, W=2$。为了计算 $h_N^{(4)}$，第 4 层需要第 3 层窗口内的 hidden states，即位置 $\{N-1,N\}$。继续向低层展开。这正对应图里的依赖锥：虽然每一层 SWA 只看 2 个位置，但为了从零恢复最高层当前位置的输出，底部输入范围会扩展到 5 个 token。
@@ -199,7 +199,7 @@ $$
 ### 示例
 
 <div align="center">
-  <img src="imgs/kv-offloading-swa-shallow-kv.png" alt="SWA shallow-layer KV storage" width="40%">
+  <img src="./imgs/kv-offloading-swa-shallow-kv.png" alt="SWA shallow-layer KV storage" width="300px">
 </div>
 
 图中例子取 $L=4, W=2, m=2$。第 1、2 层的 KV 已经保存，第 3、4 层的 KV 需要恢复。为了得到最终的 $h_N^{(4)}$，第 4 层需要窗口内 $KV_{N-1}^{(4)},KV_N^{(4)}$；这些 KV 又需要第 3 层对应位置的 hidden states。因此第 3 层要恢复位置 $\{N-1,N\}$，第 2 层需要提供位置 $\{N-2,N-1,N\}$ 的 hidden states。浅层 KV 虽然已经保存，但系统仍然要把这 3 个位置从输入侧推到第 2 层，形成一个浅层矩形带。
@@ -267,7 +267,7 @@ N_{\text{low-hidden}}
 \approx
 m \cdot |R_m|
 \approx
-m \cdot \bigl(1 + (L-m)(W-1)\bigr)
+m \cdot (1 + (L-m)(W-1))
 $$
 
 高层缺失段继续形成一个依赖锥。令 $q=L-m$，则高层 hidden-state 重算量近似为：
@@ -285,7 +285,7 @@ $$
 $$
 N_{\text{hidden}}^{\text{shallow}}
 \approx
-m \cdot \bigl(1 + q(W-1)\bigr)
+m \cdot (1 + q(W-1))
 + q + \frac{q(q-1)}{2}(W-1)
 $$
 
@@ -343,7 +343,7 @@ $$
 ### 示例
 
 <div align="center">
-  <img src="imgs/kv-offloading-swa-deep-kv.png" alt="SWA deep-layer KV storage" width="40%">
+  <img src="./imgs/kv-offloading-swa-deep-kv.png" alt="SWA deep-layer KV storage" width="300px">
 </div>
 
 图中例子取 $L=4,W=2,m=2$。第 3、4 层的 KV 已经保存，第 1、2 层的 KV 需要恢复。为了得到 $h_N^{(4)}$，第 4 层可以直接读取 $KV_{N-1}^{(4)},KV_N^{(4)}$；第 3 层也可以直接读取 $KV_{N-1}^{(3)},KV_N^{(3)}$。因此，高层只需要沿当前位置 $N$ 形成一条竖线：$h_N^{(2)} \rightarrow h_N^{(3)} \rightarrow h_N^{(4)}$。
@@ -481,7 +481,7 @@ $$
 ### 示例
 
 <div align="center">
-  <img src="imgs/kv-offloading-swa-interval-layer-kv.png" alt="SWA interval-layer KV checkpoint" width="40%">
+  <img src="./imgs/kv-offloading-swa-interval-layer-kv.png" alt="SWA interval-layer KV checkpoint" width="300px">
 </div>
 
 图中例子取 $L=4,W=2,S=2$，保存的是 Layer2 和 Layer4 的 KV。Layer1 和 Layer3 的 KV 需要在当前 step 恢复。为了得到 $h_N^{(4)}$，Layer4 可以直接读取已保存的 $KV_{N-1}^{(4)},KV_N^{(4)}$，但仍然需要输入 $h_N^{(3)}$。为了得到 $h_N^{(3)}$，Layer3 需要恢复窗口内 $KV_{N-1}^{(3)},KV_N^{(3)}$，因此需要下方 Layer2 提供 $h_{N-1}^{(2)},h_N^{(2)}$。这两个 hidden states 再由 Layer2 借助已保存的 KV 计算出来。
@@ -604,7 +604,7 @@ $$
 \left\{
 KV_t^{(\ell)}
 \mid
-\ell=1,\dots,L,\
+\ell=1,\dots,L,
 t \in \{c-W+1,\dots,c\}
 \right\}
 $$
@@ -617,6 +617,33 @@ $$
 2. 读取 checkpoint 边界状态 $\mathcal{B}_c$
 3. 从 $c+1$ 顺序重算到 $N$，恢复从 checkpoint 到当前位置之间的局部状态
 4. 使用恢复后的窗口状态完成当前 decode step
+
+### 示例
+
+<div align="center">
+  <img src="./imgs/kv-offloading-swa-token-checkpoint.png" alt="SWA token checkpoint recovery" width="300px">
+</div>
+
+图中的例子取 $L=4,W=2$，最近的 token checkpoint 位于 $c=N-2$。预测 $token_{N+1}$ 时，系统不从更早 token 展开完整依赖锥，而是从 checkpoint 边界状态出发，顺序恢复 $N-1$ 和 $N$ 两个位置。
+
+绿色实线块表示 checkpoint 已经提供的边界 KV。对第 1、2、3 层来说，恢复位置 $N-1$ 时需要读取对应层的 $KV_{N-2}^{(\ell)}$；恢复出 $KV_{N-1}^{(\ell)}$ 后，位置 $N$ 又可以继续使用它作为窗口内的历史状态。绿色虚线块表示当前恢复过程中生成的局部 KV，橙色虚线块表示随恢复过程生成的 hidden state。
+
+这个例子对应恢复长度：
+
+$$
+r=N-c=2
+$$
+
+因此 hidden-state token-layer 计算量约为：
+
+$$
+N_{\text{hidden}}^{\text{token-ckpt}}
+\approx
+L \cdot r
+=4\times 2=8
+$$
+
+图中只画出当前恢复路径实际消费的边界 KV。若按上面的 full-state checkpoint 口径实现，checkpoint 也可以保存顶层的 $KV_{N-2}^{(4)}$；它是安全的边界状态冗余，但在这个具体 decode step 中不会被读取。
 
 ### 开销
 
@@ -687,4 +714,14 @@ $$
 
 attention 逻辑读取量还要乘上窗口大小 $W$，近似为 $O(LrW)$。这里的 $r$ 由 token checkpoint 间距控制；checkpoint 边界状态已经提供 $c$ 之前的 SWA window KV，因此恢复过程不再从当前位置向左展开完整依赖锥。
 
+这个建模成立的前提是 checkpoint 保存了可继续 SWA 的边界窗口状态。若 checkpoint 只保存单点状态，$r=N-c$ 的恢复长度不成立，系统仍需要向 checkpoint 左侧补齐窗口 KV，依赖会继续向更早 token 展开。这里的 checkpoint 是推理状态恢复锚点，和训练里的 activation checkpoint 属于不同问题。
 
+## 8. 总结
+
+SWA 把预测 $token_{N+1}$ 时的直接 attention 范围限制在窗口 $\mathcal{W}_N$ 内，但 KV 存储策略决定了这些窗口状态是直接读取，还是在当前 step 恢复出来。
+
+full KV baseline 的路径最短，额外恢复计算接近 0，代价是长期保存完整历史 KV。完全重算把 KV 存储压到最低，但层间依赖会形成向低层和更早 token 扩张的依赖锥。层维 checkpoint 介于两者之间：保存浅层 KV 会留下“浅层矩形带 + 高层依赖锥”，保存深层 KV 更接近“低层依赖锥 + 高层竖线”，间隔层保存则把依赖锥切成多个梯形段。
+
+如果保存层数相同，浅层、深层和间隔层保存的 DRAM 常驻 KV 规模基本相同；差异主要来自恢复路径。深层保存通常更接近 decode 当前 step 直接消费的高层窗口状态，间隔层保存把恢复压力分摊到多个分段，浅层保存则容易在高层恢复中引入更宽的 hidden-state 矩形带。
+
+token 维 checkpoint 是另一种边界：它需要保存可继续执行 SWA 的窗口状态，而不是单个 token 状态。checkpoint 间距 $M$ 控制常驻存储与恢复长度的交换；$M$ 越大，长期状态越少，命中后从 checkpoint 到当前窗口的局部恢复越长。
