@@ -66,8 +66,15 @@ class GPUPerfModel:
         self._fitted = False
         self._warned_negative = False
         self._warned_cap = False
+        self._warned_extrapolation = False
         self._cap_count = 0
         self._cap_max_predicted = 0.0
+        # Training-data envelope, set in _fit.  predict() warns (once) when an
+        # input exceeds 2× these — the linear+interaction model is unreliable
+        # far outside the fitted region (the c·m·n term dominates and the cap
+        # then hides how detached from reality the raw prediction is).
+        self._max_loaded: int = 0
+        self._max_computed: int = 0
         self._fit()
 
     def _fit(self) -> None:
@@ -94,6 +101,11 @@ class GPUPerfModel:
             points = [PerfDataPoint(*p) for p in self._config.data_points]
         else:
             points = self.DEFAULT_DATA
+
+        # Record the training envelope for extrapolation warning in predict().
+        if points:
+            self._max_loaded = max(p.loaded_tokens for p in points)
+            self._max_computed = max(p.computed_tokens for p in points)
 
         n = len(points)
         if n == 0:
@@ -175,6 +187,27 @@ class GPUPerfModel:
             computed_tokens: New tokens to compute in this forward.
         """
         assert self._fitted, "Model not fitted"
+        # Warn (once) on extrapolation far outside the training envelope.  The
+        # interaction term c·m·n grows unboundedly, so a prediction for e.g.
+        # loaded=50000 (training max 8000) is detached from reality — even
+        # after the 50ms cap the capped value carries no information.  Surface
+        # this so the user knows to add data points or interpret with caution.
+        if not self._warned_extrapolation and (
+            loaded_tokens > 2 * self._max_loaded
+            or computed_tokens > 2 * self._max_computed
+        ) and (self._max_loaded > 0 or self._max_computed > 0):
+            import logging
+            _log = logging.getLogger(__name__)
+            _log.warning(
+                "GPU perf model input loaded=%d computed=%d is far outside the "
+                "training envelope (max loaded=%d, max computed=%d) — prediction "
+                "is an extrapolation and (after the 50ms cap) may not reflect "
+                "real latency.  Add data points covering this range or interpret "
+                "with caution.  (This warning is printed once.)",
+                loaded_tokens, computed_tokens,
+                self._max_loaded, self._max_computed,
+            )
+            self._warned_extrapolation = True
         latency = (
             self._a * loaded_tokens
             + self._b * computed_tokens

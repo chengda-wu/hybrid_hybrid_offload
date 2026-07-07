@@ -52,7 +52,7 @@ class SimulatorScheduler:
         # at admission (bounding running req count); we have no such bound, so
         # guard the loop instead.
         self._stall_count: int = 0
-        self._STALL_LIMIT: int = 1000
+        self._STALL_LIMIT: int = config.stall_limit
 
     # ------------------------------------------------------------------
     # Public

@@ -501,9 +501,15 @@ class SGLangBackend(KVBackend):
 
     @property
     def usage(self) -> float:
-        # Average of three-pool utilization
+        # Bottleneck-pool utilization = max across pools, matching real SGLang's
+        # get_max_pool_usage() (pool_stats_observer.py:64-71: max(full, swa,
+        # mamba)).  An average would mask the binding pool: SWA 95% / c4 30% /
+        # c128 20% averages to 48% (looks idle) but the SWA pool is about to
+        # OOM.  Max surfaces that pressure — it is what real SGLang reports to
+        # Prometheus and uses for admission throttling.  Per-pool detail remains
+        # available via pool_usage_detail() / pool_peak_detail().
         ratios = [r for _, r in self.pool_usage_detail()]
-        return sum(ratios) / len(ratios) if ratios else 0.0
+        return max(ratios) if ratios else 0.0
 
     def pool_usage_detail(self) -> list[tuple[str, float]]:
         # Per-pool utilization (swa/c4/c128).  Caps differ by orders of

@@ -133,6 +133,12 @@ class SimulatorConfig:
 
     # Execution
     warmup_steps: int = 10  # steps to exclude from metrics
+    # Max consecutive zero-progress steps before the scheduler bails out with
+    # a RuntimeError (decode alloc failure against a full KV pool with nothing
+    # evictable would otherwise loop forever).  Tunable: lower for fast
+    # iteration on OOM scenarios, higher for workloads with legitimately long
+    # evict-wait stalls.  See scheduler._check_stall.
+    stall_limit: int = 1000
     random_seed: int = 42
     output_dir: str | None = None
     verbose: bool = False
@@ -204,6 +210,7 @@ class SimulatorConfig:
             max_model_len=data.get("max_model_len", 8192),
             num_kv_cache_blocks=data.get("num_kv_cache_blocks", 4096),
             warmup_steps=data.get("warmup_steps", 10),
+            stall_limit=data.get("stall_limit", 1000),
             random_seed=data.get("random_seed", 42),
             output_dir=data.get("output_dir"),
             verbose=data.get("verbose", False),

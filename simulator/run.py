@@ -52,6 +52,7 @@ def main(argv: list[str] | None = None) -> int:
             max_model_len=args.max_model_len,
             num_kv_cache_blocks=args.num_kv_blocks,
             random_seed=args.seed,
+            stall_limit=args.stall_limit,
             verbose=args.verbose,
         )
         if args.gpu_data_points:
@@ -115,6 +116,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Execution
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument(
+        "--stall-limit", type=int, default=1000,
+        help="Max consecutive zero-progress steps before the scheduler errors "
+             "out (prevents infinite loop on KV-pool-full deadlock). Default 1000."
+    )
     p.add_argument("--output", "-o", type=str, help="Output JSON file")
     p.add_argument("--verbose", "-v", action="store_true")
 
