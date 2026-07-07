@@ -47,14 +47,18 @@ token 位置   0 ─────────── B ─────────
 
 ### 10.3 Delta 段当前被全量重算（含冗余）
 
-`num_new_tokens` 包含 delta，故 delta 的每个 token 都进入这一步的 `slot_mapping`。compressor forward（`compressor.py:274-399`）对 `num_actual = slot_mapping.shape[0]` 个 token **无差别执行** `save_partial_states` + `compress_norm_rope_store`——**没有"该 token 的压缩条目已缓存就 skip"的逻辑**。
+`num_new_tokens` 包含 delta，故 delta 的每个 token 都进入这一步的 `slot_mapping`。compressor forward（`compressor.py:274-399`）对 `num_actual = slot_mapping.shape[0]` 个 token **无差别执行** `save_partial_states` + `compress_norm_rope_store`——**没有"该 token 的压缩条目已缓存就 skip"的逻辑**。结果：整个 `[B, A)` 被全量重算，但其中大部分并非必需。
 
-| Delta token 的产物 | 是否已缓存 | 当前行为 | 是否冗余 |
-|---|---|---|---|
-| main MLA 压缩 KV 条目（G0） | **已缓存**（G0 命中到 A） | **重算写回** | **冗余** |
-| compressor state（G3/G4） | 未缓存（命中仅到 B） | 从 B 累积到 A | 必需 |
-| SWA ring 末端（G1/G2） | 未缓存 | 写末端 | 必需 |
-| Q/K/V + FFN GEMM | — | 全层全 token 算 | 见 §10.4 |
+关键区分——**compressor state 是滑窗的**（`sliding_window = coff·compress_ratio`，`compressor.py:142`；C4=8、C128=128），不是从 B 整段累积。state 累积只需末尾 window，**不需从 B 累积到 A**。SWA ring 同理（window=128）。
+
+| Delta token 的产物 | 是否已缓存 | 当前行为 | 真正必需范围 | 冗余部分 |
+|---|---|---|---|---|
+| main MLA 压缩 KV 条目（G0） | **已缓存**（G0 命中到 A） | 整段 `[B,A)` 重算写回 | **0**（已缓存，skip 写回即可） | 全部冗余 |
+| compressor state（G3/G4） | 末尾 window 外不保留 | 整段 `[B,A)` 跑 GEMM + 累积 | 仅 `[A−window, A)` 累积（C4=8、C128=128） | `[B, A−window)` 的 GEMM 冗余 |
+| SWA ring 末端（G1/G2） | 末尾 window 外被覆盖 | 整段 `[B,A)` 做 KV insert | 仅 `[A−128, A)` 写 ring | `[B, A−128)` 冗余 |
+| Q/K/V + FFN GEMM | — | 全层全 token 算 | 见 §11（三角形：只 `W_eff≈5500` 范围） | delta 左缘可三角形剪枝 |
+
+> **"从 B 累积到 A"是当前全量重算的行为，不是必需**。因为 compressor state / SWA ring 都是滑窗，靠前 delta token 的 state 会被末尾覆盖、ring 会被覆盖、main MLA 条目已缓存——没有任何下游路径读它们（§11.3）。真正必需的只是靠近 A 的末尾 window，以及为产出该 window 正确隐藏态而向上游回溯的 `W_eff` 宽度（§11.4）。这正是 §11 三角形论证的立足点。
 
 ---
 
