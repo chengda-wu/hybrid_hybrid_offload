@@ -49,7 +49,10 @@ $$
 若前缀命中长度为 $N$，full KV baseline 需要为命中前缀保存完整 K/V。其状态规模近似为：
 
 $$
-B_{\text{full}}(N) \approx N \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{full}}(N) \\
+\approx & N \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 其中 $H_{kv}$ 为每层 KV 头数，$D$ 为 head dim，$s$ 为每个元素字节数。公式中的系数 $2$ 来自 K 和 V 两个张量。
@@ -60,7 +63,10 @@ $$
 SWA 只限制当前 step 的 attention 读取范围；若只看第 $N$ 个位置实际参与 attention 的窗口工作集，规模为：
 
 $$
-B_{\text{swa}}(W) \approx W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{swa}}(W) \\
+\approx & W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 如果命中后的 full KV 已经在 GPU KV cache 中，当前 step 的主要数据读取就是窗口内的 $B_{\text{swa}}(W)$。
@@ -146,7 +152,11 @@ $$
 因此，完全重算需要处理的 token-layer 单元数近似为：
 
 $$
-N_{\text{hidden}} \approx \sum_{\ell=1}^{L} |R_\ell| \approx L + \frac{L(L-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{hidden}} \\
+\approx & \sum_{\ell=1}^{L} |R_\ell| \\
+\approx & L + \frac{L(L-1)}{2}(W-1)
+\end{aligned}
 $$
 
 这里统计的是需要重算的 hidden states，不包含输入 token 覆盖范围。若把输入 token 也算进去，覆盖长度近似为：
@@ -166,7 +176,11 @@ $$
 也就是说，在没有中间 checkpoint 截断依赖的情况下，单次恢复可能向前扩展到约 $7.7K$ 个输入 token 的范围。累计 hidden-state 重算量为：
 
 $$
-L + \frac{L(L-1)}{2}(W-1) = 61 + \frac{61 \times 60}{2} \times 127 = 232471
+\begin{aligned}
+L + \frac{L(L-1)}{2}(W-1) \\
+= & 61 + \frac{61 \times 60}{2} \times 127 \\
+= & 232471
+\end{aligned}
 $$
 
 
@@ -206,7 +220,10 @@ $$
 保存浅层 $1,\dots,m$ 的 full KV 时，前缀长度为 $N$ 的常驻状态规模近似为：
 
 $$
-B_{\text{shallow}}(N,m) \approx N \cdot m \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{shallow}}(N,m) \\
+\approx & N \cdot m \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 它是 full KV baseline 的 $m/L$。存储量下降来自不保存高层 KV；代价是高层窗口状态要在命中后恢复。
@@ -216,7 +233,10 @@ $$
 浅层 KV 已经保存，恢复 $R_m$ 中多个位置时，每个浅层 token-layer 单元都要读取对应层的 SWA 窗口 KV。若按逻辑 attention 读取量估算，浅层读取规模近似为：
 
 $$
-B_{\text{low-read}} \approx m \cdot |R_m| \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{low-read}} \\
+\approx & m \cdot |R_m| \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 相邻窗口之间存在重叠，实际 kernel 的 HBM 访问会受 layout、cache 命中和 batching 影响。这个式子更适合作为上界口径，表示浅层矩形带会把同一批浅层 KV 反复用于多个位置的恢复计算。
@@ -232,7 +252,10 @@ R_L=\{N\}
 $$
 
 $$
-R_{\ell-1} = \bigcup_{t \in R_\ell} \{t-W+1,\dots,t\}, \quad \ell=m+1,\dots,L
+\begin{aligned}
+R_{\ell-1} \\
+= & \bigcup_{t \in R_\ell} \{t-W+1,\dots,t\}, \quad \ell=m+1,\dots,L
+\end{aligned}
 $$
 
 忽略序列起点截断时，分界层需要提供的位置数为：
@@ -244,19 +267,30 @@ $$
 这就是浅层矩形带的宽度。保存浅层 KV 后，低层不再产生继续向更早 token 扩张的依赖锥；但为了给高层恢复提供输入，系统需要为 $R_m$ 中每个位置计算 $h_t^{(1)},\dots,h_t^{(m)}$。因此，浅层 hidden-state 计算量近似为：
 
 $$
-N_{\text{low-hidden}} \approx m \cdot |R_m| \approx m \cdot (1 + (L-m)(W-1))
+\begin{aligned}
+N_{\text{low-hidden}} \\
+\approx & m \cdot |R_m| \\
+\approx & m \cdot (1 + (L-m)(W-1))
+\end{aligned}
 $$
 
 高层缺失段继续形成一个依赖锥。令 $q=L-m$，则高层 hidden-state 重算量近似为：
 
 $$
-N_{\text{high-hidden}} \approx \sum_{\ell=m+1}^{L} |R_\ell| \approx q + \frac{q(q-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{high-hidden}} \\
+\approx & \sum_{\ell=m+1}^{L} |R_\ell| \\
+\approx & q + \frac{q(q-1)}{2}(W-1)
+\end{aligned}
 $$
 
 合起来，保存浅层 KV 时的 hidden-state 计算单元数近似为：
 
 $$
-N_{\text{hidden}}^{\text{shallow}} \approx m \cdot (1 + q(W-1)) + q + \frac{q(q-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{hidden}}^{\text{shallow}} \\
+\approx & m \cdot (1 + q(W-1)) + q + \frac{q(q-1)}{2}(W-1)
+\end{aligned}
 $$
 
 其中 $q=L-m$。这个式子对应“浅层矩形带 + 高层依赖锥”：第一项是把多个位置推过已缓存 KV 的浅层，第二项是高层缺失段内部的重算。
@@ -327,7 +361,10 @@ $$
 保存深层 $m+1,\dots,L$ 的 full KV 时，前缀长度为 $N$ 的常驻状态规模近似为：
 
 $$
-B_{\text{deep}}(N,m) \approx N \cdot (L-m) \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{deep}}(N,m) \\
+\approx & N \cdot (L-m) \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 它是 full KV baseline 的 $(L-m)/L$。若和保存浅层方案使用同样的层数，DRAM 存储量相近；差异主要体现在命中后的恢复计算路径。
@@ -337,7 +374,10 @@ $$
 深层 KV 已经保存，当前 step 在深层每一层读取窗口内 KV。逻辑读取量近似为：
 
 $$
-B_{\text{deep-read}} \approx (L-m) \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{deep-read}} \\
+\approx & (L-m) \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 低层缺失 KV 在恢复路径中生成和消费。与保存浅层相比，深层保存减少了高层多位置恢复时对 KV 的重复读取；高层只需要服务当前位置 $N$ 的竖线计算。
@@ -355,7 +395,10 @@ $$
 对缺失 KV 的低层，有：
 
 $$
-R_{\ell-1} = \bigcup_{t \in R_\ell} \{t-W+1,\dots,t\}, \quad \ell=1,\dots,m
+\begin{aligned}
+R_{\ell-1} \\
+= & \bigcup_{t \in R_\ell} \{t-W+1,\dots,t\}, \quad \ell=1,\dots,m
+\end{aligned}
 $$
 
 忽略序列起点截断时：
@@ -367,7 +410,11 @@ $$
 因此，低层依赖锥需要计算的 hidden-state 单元数为：
 
 $$
-N_{\text{low-hidden}}^{\text{deep}} \approx \sum_{\ell=1}^{m} |R_\ell| \approx m + \frac{m(m-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{low-hidden}}^{\text{deep}} \\
+\approx & \sum_{\ell=1}^{m} |R_\ell| \\
+\approx & m + \frac{m(m-1)}{2}(W-1)
+\end{aligned}
 $$
 
 深层 KV 已经保存，但当前位置仍然要逐层向上计算 hidden state。令 $q=L-m$，深层竖线的 hidden-state 单元数为：
@@ -379,7 +426,11 @@ $$
 合起来，保存深层 KV 时的 hidden-state 计算单元数近似为：
 
 $$
-N_{\text{hidden}}^{\text{deep}} \approx m + \frac{m(m-1)}{2}(W-1) + q = L + \frac{m(m-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{hidden}}^{\text{deep}} \\
+\approx & m + \frac{m(m-1)}{2}(W-1) + q \\
+= & L + \frac{m(m-1)}{2}(W-1)
+\end{aligned}
 $$
 
 以 DeepSeek V4 Pro 的量级估算，若取 $L=61,W=128$，并保存后 $31$ 层深层 KV，则缺失低层数为 $m=30$，深层竖线长度为 $q=31$。低层依赖锥的 hidden-state 计算量为：
@@ -452,7 +503,10 @@ $$
 间隔保存 full KV 时，常驻层数为 $G=L/S$。前缀长度为 $N$ 时，存储规模近似为：
 
 $$
-B_{\text{interval}}(N,S) \approx N \cdot \frac{L}{S} \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{interval}}(N,S) \\
+\approx & N \cdot \frac{L}{S} \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 相对于 full KV baseline，它把层维存储比例降到 $1/S$。例如 $S=2$ 时，只保存一半层的 KV。
@@ -462,7 +516,10 @@ $$
 当前 step 会读取保存层上的窗口 KV。若第 $j$ 个保存层需要计算 $b_j$ 个位置的 hidden output，则逻辑读取量近似为：
 
 $$
-B_{\text{saved-read}} \approx \left(\sum_{j=0}^{G-1} b_j\right) \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{saved-read}} \\
+\approx & \left(\sum_{j=0}^{G-1} b_j\right) \cdot W \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 未保存层的 K/V 在恢复路径中生成和消费，通常表现为中间结果读写；长期 full KV 的读取只发生在保存层。实际 HBM 压力取决于 kernel 是否能把这些中间状态留在片上，或者是否需要把分段恢复结果写回 HBM 后再被后续层读取。
@@ -502,19 +559,28 @@ $$
 第 $j$ 段内部需要计算的 hidden-state 单元数近似为：
 
 $$
-C_{\text{seg-hidden}}(b_j) \approx S \cdot b_j + \frac{(S-1)(S-2)}{2}(W-1)
+\begin{aligned}
+C_{\text{seg-hidden}}(b_j) \\
+\approx & S \cdot b_j + \frac{(S-1)(S-2)}{2}(W-1)
+\end{aligned}
 $$
 
 其中第一项是宽度为 $b_j$ 的矩形带，第二项是段内未保存层继续展开形成的小三角。总 hidden-state 计算量为：
 
 $$
-N_{\text{hidden}}^{\text{interval}} \approx \sum_{j=0}^{G-1} \left[ S \cdot b_j + \frac{(S-1)(S-2)}{2}(W-1) \right]
+\begin{aligned}
+N_{\text{hidden}}^{\text{interval}} \\
+\approx & \sum_{j=0}^{G-1} \left[ S \cdot b_j + \frac{(S-1)(S-2)}{2}(W-1) \right]
+\end{aligned}
 $$
 
 代入 $b_j$ 后得到：
 
 $$
-N_{\text{hidden}}^{\text{interval}} \approx L + \frac{G(S-1)(S-2)}{2}(W-1) + \frac{S(S-1)G(G-1)}{2}(W-1)
+\begin{aligned}
+N_{\text{hidden}}^{\text{interval}} \\
+\approx & L + \frac{G(S-1)(S-2)}{2}(W-1) + \frac{S(S-1)G(G-1)}{2}(W-1)
+\end{aligned}
 $$
 
 ## 7. 间隔 Token Checkpoint
@@ -522,7 +588,10 @@ $$
 若 checkpoint 只保存位置 $c$ 的单个 hidden state 或单个 $KV_c^{(\ell)}$，它无法独立恢复后续 token，计算 $c+1$ 时仍然需要每一层窗口内的历史 KV。为了让 checkpoint 成为可继续 decode 的边界，这里采用一个 full-state checkpoint 口径：在 checkpoint 位置 $c$，保存每一层窗口末端的 full KV：
 
 $$
-\mathcal{B}_c = \left\{ KV_t^{(\ell)} \mid \ell=1,\dots,L, t \in \{c-W+1,\dots,c\} \right\}
+\begin{aligned}
+\mathcal{B}_c \\
+= & \left\{ KV_t^{(\ell)} \mid \ell=1,\dots,L, t \in \{c-W+1,\dots,c\} \right\}
+\end{aligned}
 $$
 
 若 $c<W$，窗口左端按序列起点截断。
@@ -577,7 +646,10 @@ $$
 若 checkpoint 保存 full SWA 边界状态，常驻存储规模近似为：
 
 $$
-B_{\text{token-ckpt}}(N,M) \approx \left\lceil \frac{N}{M} \right\rceil \cdot W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{token-ckpt}}(N,M) \\
+\approx & \left\lceil \frac{N}{M} \right\rceil \cdot W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 相对于完整历史 full KV 的 $B_{\text{full}}(N)$，这个比例约为 $W/M$。当 $M>W$ 时，checkpoint 的常驻 KV 小于完整历史 full KV；当 $M$ 接近 $W$ 或更小，checkpoint 窗口之间会出现较多重叠，存储优势会下降。实际系统若对重叠窗口做去重，存储口径会低于这个 full-state 上界。
@@ -587,7 +659,10 @@ $$
 命中后，系统需要读取最近的边界 checkpoint $\mathcal{B}_c$。因此，单次恢复的 checkpoint 读取量近似为：
 
 $$
-B_{\text{token-ckpt-read}} \approx W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\begin{aligned}
+B_{\text{token-ckpt-read}} \\
+\approx & W \cdot L \cdot 2 \cdot H_{kv} \cdot D \cdot s
+\end{aligned}
 $$
 
 如果 checkpoint 不在 GPU HBM 中，这部分状态还会引入跨层级搬运。恢复区间内生成的中间状态是否写回 HBM，取决于实现是否能把局部 prefill 留在片上或融合到后续计算中。
