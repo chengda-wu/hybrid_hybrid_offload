@@ -169,5 +169,75 @@ class TestAllocateSlots(unittest.TestCase):
                          backend._mock_allocator.total_tokens - 514)
 
 
+@requires_sglang
+class TestSwaNoDoubleDeduction(unittest.TestCase):
+    """NEW-L regression: SWA must not be double-deducted.
+
+    _reclaim_swa_out_of_window returns out-of-window SWA slots during decode.
+    Later, when the request finishes and its tree nodes are evicted, the
+    on_free callback must NOT deduct SWA again for those reclaimed tokens
+    (real SWARadixCache prevents this via tombstones; we use plain RadixCache,
+    so SWA is decoupled from on_free).  Before the fix, evict() fired
+    _deduct_pool_used on already-reclaimed tokens, under-counting SWA by the
+    reclaimed amount.
+    """
+
+    def test_swa_returns_to_zero_after_free_and_evict(self):
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        backend = _make_backend()
+        swa_per_tok = backend._swa_per_tok
+        # Long enough to trigger SWA reclamation (threshold = charged-1-128-256
+        # > 0  ⇒  charged > 385).
+        req = backend.create_request("r1", list(range(900)), max_tokens=10)
+        backend.register_request(req)
+        backend.allocate_slots(req, num_new_tokens=900)
+        backend.sync_state(req, [])
+        # Reclaim must have advanced the cursor (charged 900 > 385).
+        self.assertGreater(req.swa_evicted_charged, 0,
+                           "SWA reclamation did not fire — test preconditions unmet")
+
+        # Finish the request, then evict its (now unlocked) tree nodes.
+        backend.free(req)
+        for _ in range(40):
+            backend._cache.evict(EvictParams(num_tokens=4096))
+
+        # All three pools must be fully drained — no SWA double-deduction
+        # residue (clamped negatives) and no c4/c128 leak.
+        self.assertEqual(backend._pool_used, [0, 0, 0],
+                         f"pools not drained after free+evict: {backend._pool_used}")
+
+    def test_swa_not_undercounted_when_other_request_still_live(self):
+        """The original NEW-L symptom: after evicting a finished request's
+        tree nodes, SWA must still reflect the still-live request's footprint
+        (not be driven below it by the reclaimed-portion double-deduction)."""
+        from sglang.srt.mem_cache.base_prefix_cache import EvictParams
+
+        backend = _make_backend()
+        swa_per_tok = backend._swa_per_tok
+        r1 = backend.create_request("r1", list(range(900)), max_tokens=10)
+        backend.register_request(r1)
+        backend.allocate_slots(r1, num_new_tokens=900)
+        backend.sync_state(r1, [])
+
+        r2 = backend.create_request("r2", list(range(900, 1800)), max_tokens=10)
+        backend.register_request(r2)
+        backend.allocate_slots(r2, num_new_tokens=900)
+        backend.sync_state(r2, [])
+
+        r2_in_window = (r2.swa_charged_tokens - r2.swa_evicted_charged) * swa_per_tok
+
+        # Finish + evict r1 while r2 is still live.
+        backend.free(r1)
+        for _ in range(40):
+            backend._cache.evict(EvictParams(num_tokens=4096))
+
+        # SWA must equal r2's live in-window footprint (r1 fully drained).
+        self.assertEqual(backend._pool_used[0], r2_in_window,
+                         f"SWA under-counted after r1 evict: got "
+                         f"{backend._pool_used[0]}, expected {r2_in_window} "
+                         f"(double-deduction of r1's reclaimed SWA)")
+
+
 if __name__ == "__main__":
     unittest.main()

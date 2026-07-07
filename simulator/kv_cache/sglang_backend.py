@@ -102,6 +102,16 @@ class SGLangBackend(KVBackend):
 
         # Single RadixCache allocator (one index per token).
         total_slots = sglang_cfg.swa_tokens + sglang_cfg.c4_tokens + sglang_cfg.c128_tokens
+        # on_free fires for every flat-index free (rejected tail in
+        # free_rejected_slots, unaligned tail in free(), tree nodes in evict()).
+        # It deducts c4/c128 ONLY — NOT SWA.  SWA is decoupled: out-of-window
+        # SWA is returned by _reclaim_swa_out_of_window, in-window SWA at
+        # request finish (free) / rejection (free_rejected_slots).  This avoids
+        # the double-deduction where evict() of a tree node whose SWA was
+        # already reclaimed would otherwise subtract SWA a second time (real
+        # SWARadixCache prevents this via tombstoning reclaimed nodes before
+        # evict, swa_radix_cache.py:615 — we use plain RadixCache with no
+        # tombstones, so SWA must not flow through on_free).
         self._mock_allocator = MockTokenToKVPoolAllocator(
             total_slots,
             on_free=lambda n: self._deduct_pool_used(n),
@@ -272,10 +282,20 @@ class SGLangBackend(KVBackend):
         return new_indices
 
     def _deduct_pool_used(self, num_tokens: int) -> None:
-        """Decrement per-pool slot usage when tokens are freed."""
+        """Decrement c4/c128 slot usage when flat indices are freed.
+
+        SWA is intentionally NOT deducted here.  c4/c128 are full-retention
+        pools (no sliding-window reclamation), so a flat-index free corresponds
+        one-to-one to a c4/c128 slot return — whether from rejected-spec tail,
+        unaligned finish tail, or evict() of a cached tree node.  SWA differs:
+        out-of-window SWA is returned by _reclaim_swa_out_of_window and
+        in-window SWA at finish/rejection (see free / free_rejected_slots).
+        Routing SWA through this callback would double-deduct the reclaimed
+        portion when evict() later frees the same tree node (real SWARadixCache
+        avoids this via tombstones; we have none, so SWA stays out of on_free).
+        """
         if num_tokens <= 0:
             return
-        self._pool_used[0] = max(0, self._pool_used[0] - num_tokens * self._swa_per_tok)
         self._pool_used[1] = max(0, self._pool_used[1] - num_tokens * self._c4_per_tok)
         self._pool_used[2] = max(0, self._pool_used[2] - num_tokens * self._c128_per_tok)
 
@@ -417,11 +437,17 @@ class SGLangBackend(KVBackend):
                 sim_req._allocated_indices = [flat[:keep_len].clone()]
             else:
                 sim_req._allocated_indices = []
-            # Rejected/beyond tokens were billed to swa_charged_tokens in
-            # allocate_slots; drop them so the SWA reclaim cursor stays
-            # consistent with actually-held tokens.
+            # Rejected/beyond tokens were billed to swa_charged_tokens (and
+            # _pool_used[0]) in allocate_slots; drop them so the SWA reclaim
+            # cursor stays consistent with actually-held tokens.  on_free now
+            # deducts only c4/c128, so deduct SWA explicitly here — the
+            # rejected tail is in-window (just allocated this step, reclaim
+            # hasn't touched it), so its full SWA slots are returned.
             sim_req.swa_charged_tokens = max(
                 0, sim_req.swa_charged_tokens - num_rejected
+            )
+            self._pool_used[0] = max(
+                0, self._pool_used[0] - num_rejected * self._swa_per_tok
             )
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
@@ -441,7 +467,7 @@ class SGLangBackend(KVBackend):
             self._cache.dec_lock_ref(sim_req._last_node)
             sim_req._last_node = None
 
-        # Free unaligned tail
+        # Free unaligned tail (on_free deducts c4/c128 only — NOT SWA).
         all_tokens = array(
             "q", sim_req.prompt_token_ids + sim_req.output_token_ids
         )
@@ -453,7 +479,24 @@ class SGLangBackend(KVBackend):
 
         if len(flat) > key_len:
             tail = flat[key_len:]
-            self._mock_allocator.free(tail)  # on_free handles _deduct_pool_used
+            self._mock_allocator.free(tail)
+        # Return the request's remaining (in-window) SWA slots.  Out-of-window
+        # SWA was already returned by _reclaim_swa_out_of_window (tracked by
+        # swa_evicted_charged); the in-window remainder is returned here, once.
+        # This is the counterpart to routing SWA out of on_free: without it the
+        # in-window SWA would leak.  (Real SGLang returns in-window SWA at
+        # evict() of the cached node, not at finish — we finish-early here
+        # because plain RadixCache has no tombstone to prevent evict
+        # double-counting.  Conservative: under-counts SWA between finish and
+        # evict for finished-but-still-cached requests, which the SWA pool's
+        # large headroom absorbs.)
+        in_window = sim_req.swa_charged_tokens - sim_req.swa_evicted_charged
+        if in_window > 0:
+            self._pool_used[0] = max(
+                0, self._pool_used[0] - in_window * self._swa_per_tok
+            )
+        sim_req.swa_charged_tokens = 0
+        sim_req.swa_evicted_charged = 0
         sim_req._allocated_indices = []
 
     @property
