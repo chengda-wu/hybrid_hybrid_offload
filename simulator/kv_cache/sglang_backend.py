@@ -430,38 +430,32 @@ class SGLangBackend(KVBackend):
                 f"The tail-assumption contract is broken (see docstring) — "
                 f"rejecting now would leak slots."
             )
-        if len(flat) >= num_rejected:
-            # Contract guard: rejected slots must be the global tail of the
-            # flattened allocation log.  This holds only because each decode
-            # step calls allocate_slots exactly once (1+K tokens, appended at
-            # the tail) and accepted tokens are never freed mid-request.  If a
-            # future change adds multi-segment per-step allocation or partial
-            # mid-step frees, this assertion will fire — at which point
-            # free_rejected_slots must switch to tracking per-step segment
-            # bounds instead of assuming a global tail.
-            assert len(flat) - num_rejected >= 0, (
-                "free_rejected_slots would underflow: the tail-assumption "
-                "contract is broken (see docstring)."
-            )
-            self._mock_allocator.free(flat[-num_rejected:])
-            # Remove freed indices from _allocated_indices
-            keep_len = len(flat) - num_rejected
-            if keep_len > 0:
-                sim_req._allocated_indices = [flat[:keep_len].clone()]
-            else:
-                sim_req._allocated_indices = []
-            # Rejected/beyond tokens were billed to swa_charged_tokens (and
-            # _pool_used[0]) in allocate_slots; drop them so the SWA reclaim
-            # cursor stays consistent with actually-held tokens.  on_free now
-            # deducts only c4/c128, so deduct SWA explicitly here — the
-            # rejected tail is in-window (just allocated this step, reclaim
-            # hasn't touched it), so its full SWA slots are returned.
-            sim_req.swa_charged_tokens = max(
-                0, sim_req.swa_charged_tokens - num_rejected
-            )
-            self._pool_used[0] = max(
-                0, self._pool_used[0] - num_rejected * self._swa_per_tok
-            )
+        # Reaching here guarantees len(flat) >= num_rejected (the guard above
+        # raised otherwise), so the tail free + keep_len are safe.  Contract:
+        # rejected slots are the global tail of the flattened allocation log,
+        # which holds only because each decode step calls allocate_slots once
+        # (1+K tokens appended at the tail) and accepted tokens are never freed
+        # mid-request.  If a future change adds multi-segment per-step
+        # allocation, the guard above must switch to per-step segment bounds.
+        self._mock_allocator.free(flat[-num_rejected:])
+        # Remove freed indices from _allocated_indices
+        keep_len = len(flat) - num_rejected
+        if keep_len > 0:
+            sim_req._allocated_indices = [flat[:keep_len].clone()]
+        else:
+            sim_req._allocated_indices = []
+        # Rejected/beyond tokens were billed to swa_charged_tokens (and
+        # _pool_used[0]) in allocate_slots; drop them so the SWA reclaim
+        # cursor stays consistent with actually-held tokens.  on_free now
+        # deducts only c4/c128, so deduct SWA explicitly here — the
+        # rejected tail is in-window (just allocated this step, reclaim
+        # hasn't touched it), so its full SWA slots are returned.
+        sim_req.swa_charged_tokens = max(
+            0, sim_req.swa_charged_tokens - num_rejected
+        )
+        self._pool_used[0] = max(
+            0, self._pool_used[0] - num_rejected * self._swa_per_tok
+        )
 
     def free(self, sim_req: "SGLangSimRequest") -> None:
         """Free unaligned tail indices and release lock_ref.

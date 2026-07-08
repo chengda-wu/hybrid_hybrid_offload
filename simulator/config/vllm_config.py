@@ -181,29 +181,36 @@ class VLLMConfig:
 
 
 def _vllm_config_ns(num_blocks: int):
-    """Minimal VllmConfig-like object for may_override_num_blocks.
+    """Build a real, minimal VllmConfig for ``may_override_num_blocks``.
 
-    Isolated helper — replace with a real VllmConfig if may_override_num_blocks
-    ever reads beyond cache_config.num_gpu_blocks_override.
+    We construct an actual ``vllm.config.VllmConfig`` (only
+    cache_config.num_gpu_blocks_override set; model_config left at its default
+    None) rather than a SimpleNamespace stand-in.  ``__post_init__`` early-
+    returns when model_config is None (vllm.py:1893), so no model/parallel
+    cross-validation runs; CacheConfig has no ``__post_init__``.  This is
+    robust to vLLM upgrades: if a future version makes the call chain read
+    additional vllm_config fields, the real object has them (with defaults)
+    instead of raising AttributeError or silently returning None and
+    miscounting blocks.
 
-    Verified field whitelist (vllm/v1/core/kv_cache_utils.py:940-947):
-    may_override_num_blocks reads ONLY ``cache_config.num_gpu_blocks_override``.
-    We call ``_get_kv_cache_config_packed`` directly (not
-    ``get_kv_cache_config_from_groups``), so the broader vllm_config reads in
-    ``get_kv_cache_config_from_groups`` / ``_use_packed_kv_cache_config``
-    (parallel_config, kv_transfer_config, model_config) are NOT exercised.  The
-    assert below guards this assumption: if a future vLLM bumps the call to go
-    through get_kv_cache_config_from_groups (which reads many more fields), the
-    assert fails loudly instead of silently producing wrong block counts.
+    Verified call path: ``from_backend_config`` calls
+    ``_get_kv_cache_config_packed`` directly (vllm_config.py:153), which only
+    touches ``cache_config.num_gpu_blocks_override`` via
+    ``may_override_num_blocks`` (kv_cache_utils.py:940-947).  It does NOT route
+    through ``get_kv_cache_config_from_groups`` / ``_use_packed_kv_cache_config``
+    (which read parallel_config / kv_transfer_config / model_config) — but the
+    real VllmConfig carries those too, so even that path change is safe.
+
+    Built once per backend construction (not per request), so the cost of
+    initializing the default sub-configs is negligible.
     """
-    from types import SimpleNamespace
-    ns = SimpleNamespace(
-        cache_config=SimpleNamespace(num_gpu_blocks_override=num_blocks),
+    from vllm.config import CacheConfig, VllmConfig
+
+    # model_config is omitted (NOT passed as None): VllmConfig is a pydantic
+    # dataclass whose model_config field defaults to None, but explicitly
+    # passing None trips pydantic's type validation (ModelConfig required).
+    # Omitting it takes the default, which __post_init__ handles via its
+    # `if self.model_config is None` early-return (vllm.py:1893).
+    return VllmConfig(
+        cache_config=CacheConfig(num_gpu_blocks_override=num_blocks),
     )
-    # Fail fast if our call path changed.  We invoke
-    # _get_kv_cache_config_packed directly (from_backend_config), which only
-    # touches cache_config.num_gpu_blocks_override via may_override_num_blocks.
-    # If that ever stops holding, the SimpleNamespace will AttributeError on
-    # the missing field — preferable to silent miscounting.
-    assert ns.cache_config.num_gpu_blocks_override == num_blocks
-    return ns
