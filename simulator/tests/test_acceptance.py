@@ -168,5 +168,56 @@ class TestMarginalReproduction(unittest.TestCase):
             self.assertAlmostEqual(got, want, delta=0.01)
 
 
+class TestForgetRequest(unittest.TestCase):
+    """NEW-M: finished requests' RNGs must be reclaimable."""
+
+    def test_forget_request_drops_cached_rng(self):
+        cfg = SpeculativeDecodeConfig(
+            accept_mode="per_position",
+            acceptance_rates=[0.9, 0.8],
+            num_spec_tokens=2,
+        )
+        m = AcceptanceModel(cfg, seed=42)
+        req = SimRequestState(
+            request_id="r1",
+            prompt_token_ids=[1, 2, 3],
+            ground_truth_output=[10, 20, 30, 40, 50],
+            max_output_tokens=5,
+        )
+        m.evaluate(req, [10, 20])
+        self.assertIn("r1", m._req_rngs)
+        m.forget_request("r1")
+        self.assertNotIn("r1", m._req_rngs)
+
+    def test_forget_request_idempotent_on_unknown_id(self):
+        cfg = SpeculativeDecodeConfig(
+            accept_mode="per_position",
+            acceptance_rates=[0.9, 0.8],
+            num_spec_tokens=2,
+        )
+        m = AcceptanceModel(cfg, seed=42)
+        # Unknown id must not raise.
+        m.forget_request("never-seen")
+
+    def test_re_evaluating_after_forget_reproduces_sequence(self):
+        """forget_request is safe: a re-derived RNG yields the same draws."""
+        cfg = SpeculativeDecodeConfig(
+            accept_mode="fixed",
+            acceptance_rate=0.5,
+            num_spec_tokens=2,
+        )
+        m = AcceptanceModel(cfg, seed=42)
+        req = SimRequestState(
+            request_id="r2",
+            prompt_token_ids=[1, 2, 3],
+            ground_truth_output=[10, 20, 30, 40, 50, 60, 70],
+            max_output_tokens=7,
+        )
+        draws_before = [m._req_rng("r2").random() for _ in range(5)]
+        m.forget_request("r2")
+        draws_after = [m._req_rng("r2").random() for _ in range(5)]
+        self.assertEqual(draws_before, draws_after)
+
+
 if __name__ == "__main__":
     unittest.main()

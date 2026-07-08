@@ -170,8 +170,25 @@ def _vllm_config_ns(num_blocks: int):
 
     Isolated helper — replace with a real VllmConfig if may_override_num_blocks
     ever reads beyond cache_config.num_gpu_blocks_override.
+
+    Verified field whitelist (vllm/v1/core/kv_cache_utils.py:940-947):
+    may_override_num_blocks reads ONLY ``cache_config.num_gpu_blocks_override``.
+    We call ``_get_kv_cache_config_packed`` directly (not
+    ``get_kv_cache_config_from_groups``), so the broader vllm_config reads in
+    ``get_kv_cache_config_from_groups`` / ``_use_packed_kv_cache_config``
+    (parallel_config, kv_transfer_config, model_config) are NOT exercised.  The
+    assert below guards this assumption: if a future vLLM bumps the call to go
+    through get_kv_cache_config_from_groups (which reads many more fields), the
+    assert fails loudly instead of silently producing wrong block counts.
     """
     from types import SimpleNamespace
-    return SimpleNamespace(
+    ns = SimpleNamespace(
         cache_config=SimpleNamespace(num_gpu_blocks_override=num_blocks),
     )
+    # Fail fast if our call path changed.  We invoke
+    # _get_kv_cache_config_packed directly (from_backend_config), which only
+    # touches cache_config.num_gpu_blocks_override via may_override_num_blocks.
+    # If that ever stops holding, the SimpleNamespace will AttributeError on
+    # the missing field — preferable to silent miscounting.
+    assert ns.cache_config.num_gpu_blocks_override == num_blocks
+    return ns

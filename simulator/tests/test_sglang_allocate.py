@@ -239,5 +239,22 @@ class TestSwaNoDoubleDeduction(unittest.TestCase):
                          f"(double-deduction of r1's reclaimed SWA)")
 
 
+    def test_free_rejected_slots_raises_when_tail_too_short(self):
+        """NEW-N: free_rejected_slots must not silently no-op when the tail
+        is shorter than num_rejected.  Previously the ``len(flat) <
+        num_rejected`` case fell through with no else branch, leaking the
+        rejected slots (and, after the SWA-decoupling fix, leaking their
+        c4/c128/SWA pool slots too).  It now raises RuntimeError so a future
+        contract break surfaces loudly instead of corrupting pool accounting."""
+        backend = _make_backend()
+        req = backend.create_request("r1", list(range(512)), max_tokens=20)
+        backend.register_request(req)
+        backend.allocate_slots(req, num_new_tokens=512)
+        backend.sync_state(req, [])
+        # Only 515 allocated, but ask to free 999 — far more than the tail.
+        with self.assertRaises(RuntimeError):
+            backend.free_rejected_slots(req, num_rejected=999)
+
+
 if __name__ == "__main__":
     unittest.main()

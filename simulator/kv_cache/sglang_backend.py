@@ -417,6 +417,19 @@ class SGLangBackend(KVBackend):
         flat = torch.cat(
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
+        if len(flat) < num_rejected:
+            # Should be unreachable: each decode step appends 1+K tokens and
+            # rejects ≤ K, so the tail always has enough to free.  If this
+            # fires, _allocated_indices is out of sync with the scheduler's
+            # rejection count (e.g. a future multi-segment-per-step change) and
+            # the rejected slots would silently leak — fail loudly instead of
+            # leaking both the flat indices and their c4/c128/SWA pool slots.
+            raise RuntimeError(
+                f"free_rejected_slots: only {len(flat)} allocated indices but "
+                f"asked to free {num_rejected} for request {sim_req.request_id}. "
+                f"The tail-assumption contract is broken (see docstring) — "
+                f"rejecting now would leak slots."
+            )
         if len(flat) >= num_rejected:
             # Contract guard: rejected slots must be the global tail of the
             # flattened allocation log.  This holds only because each decode
@@ -655,9 +668,27 @@ class SGLangBackend(KVBackend):
                 state = state_tok * idx_state_bytes * info.layer_count
                 group_bytes = kv + state
             else:
-                # Main KV: ceil_div(size, page_size) pages.
-                # storage_bs = page_bytes // 584 (unpadded bytes / per-token bytes)
-                storage_bs = info.page_bytes // 584
+                # Main KV (c4_mla / c128_mla / full): ceil_div(size, page) pages.
+                # storage_bs = page_bytes // per_token_bytes (tokens per storage
+                # block).  For DSV4 MLA groups per_token_bytes = 584 (kv_bytes),
+                # so page_bytes (64*584 or 2*584) divides evenly.  Derive
+                # per_token_bytes from the architecture rather than hardcoding
+                # 584 so a future non-MLA "full" group (page_bytes =
+                # 2*bs*kv_heads*head_size*dtype, not a multiple of 584) does
+                # not silently yield storage_bs=0 and a wrong size_tok.
+                if self._backend_config.model_arch.is_mla:
+                    per_token_bytes = kv_bytes  # 584
+                else:
+                    # _build_kv_cache_groups: full page_bytes =
+                    # 2 * block_size * kv_heads * head_size * dtype_size(=2)
+                    # → per_token_bytes = page_bytes / block_size.
+                    per_token_bytes = info.page_bytes // info.block_size
+                # Fall back to the DSV4 constant when the derived value would
+                # not divide page_bytes (guards against partial non-MLA paths
+                # in this otherwise DSV4-specific method).
+                if per_token_bytes <= 0 or info.page_bytes % per_token_bytes:
+                    per_token_bytes = kv_bytes
+                storage_bs = info.page_bytes // per_token_bytes
                 size_tok = full_tokens // (info.block_size // storage_bs) if storage_bs else full_tokens
                 kv_pages = _sglang_page_count(size_tok, storage_bs)
                 group_bytes = info.layer_count * kv_pages * _pad576(info.page_bytes)

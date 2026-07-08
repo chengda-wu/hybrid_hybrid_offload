@@ -390,6 +390,9 @@ class SimulatorScheduler:
         for req_id, req in list(self._running.items()):
             if req.is_finished:
                 self._backend.free(req.backend_req)
+                # Release the finished request's cached acceptance RNG so
+                # _req_rngs doesn't grow unbounded over long runs.
+                self._acceptance.forget_request(req.request_id)
                 if self._step > self._warmup:
                     self._recorder.record_request_done(req, self._sim_time)
                 del self._running[req_id]

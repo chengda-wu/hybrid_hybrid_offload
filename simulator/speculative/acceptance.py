@@ -234,3 +234,16 @@ class AcceptanceModel:
             rng = random.Random(req_seed)
             self._req_rngs[request_id] = rng
         return rng
+
+    def forget_request(self, request_id: str) -> None:
+        """Drop a finished request's cached RNG.
+
+        Called by the scheduler when a request finishes, so ``_req_rngs`` does
+        not grow unbounded over long runs (each ``random.Random`` is ~2.5 KB;
+        100k requests would otherwise retain ~250 MB).  Safe because the RNG is
+        derived deterministically from (seed, request_id): if the same id were
+        ever re-evaluated, ``_req_rng`` would lazily rebuild an identical RNG
+        producing the same sequence.  (Finished requests are not re-evaluated
+        in practice, so this is purely a memory hygiene measure.)
+        """
+        self._req_rngs.pop(request_id, None)
