@@ -99,15 +99,17 @@ class TestLayerNames(unittest.TestCase):
         ]
         by_head = {g.kv_cache_spec.head_size: g for g in comp_groups}
         # C4 compressor (head_size=2048) keyed by real c4 layer indices.
+        # CompressorStateCache registers its prefix as
+        # model.layers.{N}.attn.compressor.state_cache (compressor.py:244).
         c4_names = by_head[2048].layer_names
         self.assertEqual(len(c4_names), len(self.c4_idx))
         for i, n in zip(self.c4_idx, c4_names):
-            self.assertEqual(n, f"model.layers.{i}.attn.compressor")
+            self.assertEqual(n, f"model.layers.{i}.attn.compressor.state_cache")
         # C128 compressor (head_size=1024) keyed by real c128 layer indices.
         c128_names = by_head[1024].layer_names
         self.assertEqual(len(c128_names), len(self.c128_idx))
         for i, n in zip(self.c128_idx, c128_names):
-            self.assertEqual(n, f"model.layers.{i}.attn.compressor")
+            self.assertEqual(n, f"model.layers.{i}.attn.compressor.state_cache")
 
     def test_main_mla_uses_real_indices_and_attn_prefix(self):
         groups = self._groups()
@@ -137,7 +139,9 @@ class TestLayerNames(unittest.TestCase):
         names = indexer_groups[0].layer_names
         self.assertEqual(len(names), len(self.c4_idx))
         for i, n in zip(self.c4_idx, names):
-            self.assertEqual(n, f"model.layers.{i}.attn.indexer")
+            # DeepseekV4IndexerCache registers its prefix as
+            # model.layers.{N}.attn.indexer.k_cache (attention.py:733).
+            self.assertEqual(n, f"model.layers.{i}.attn.indexer.k_cache")
 
     def test_no_self_attn_in_dsv4_names(self):
         """DSV4 uses .attn, not .self_attn — guard against regression."""

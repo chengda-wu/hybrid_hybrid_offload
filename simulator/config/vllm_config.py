@@ -87,7 +87,7 @@ class VLLMConfig:
                     )))
             elif name == "c4_compressor":
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.attn.compressor" for i in c4_idx],
+                    [f"model.layers.{i}.attn.compressor.state_cache" for i in c4_idx],
                     SlidingWindowMLASpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=2048, dtype=_torch.float32,
@@ -95,7 +95,7 @@ class VLLMConfig:
                     )))
             elif name == "c128_compressor":
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.attn.compressor" for i in c128_idx],
+                    [f"model.layers.{i}.attn.compressor.state_cache" for i in c128_idx],
                     SlidingWindowMLASpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=1024, dtype=_torch.float32,
@@ -117,7 +117,7 @@ class VLLMConfig:
                 # (attention.py:725-729 — fp4 uses same allocation, half unused)
                 idx_hd = 132
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.attn.indexer" for i in c4_idx],
+                    [f"model.layers.{i}.attn.indexer.k_cache" for i in c4_idx],
                     MLAAttentionSpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=idx_hd, dtype=_torch.uint8,
