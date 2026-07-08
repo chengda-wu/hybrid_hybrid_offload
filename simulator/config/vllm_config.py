@@ -49,17 +49,31 @@ class VLLMConfig:
         # added — only the SWA bucket's layer count rises.
         num_mtp_layers = arch.num_mtp_layers if bc.num_spec_tokens > 0 else 0
 
+        # Actual layer indices per compress-ratio bucket, matching the HF
+        # config's per-layer compress_ratios (e.g. DSV4: [0,0,4,128,4,128,...]).
+        # Real vLLM names modules by their real layer index
+        # (model.layers.{N}.attn, N from extract_layer_index(prefix),
+        # model.py:558,804) — NOT a sequential 0..nlayers-1 bucket index.
+        # _bucket_layers_by_page_size only consumes len(layer_names), so the
+        # counts are what matter for sizing; but using the real indices and the
+        # real ``.attn`` prefix (not ``.self_attn``) keeps these names valid as
+        # dict keys should a future code path bind them (init_attn_backend /
+        # _reshape_kv_cache / bind_kv_cache look up by name).
+        ratios = arch.compress_ratios or []
+        c4_idx = [i for i, cr in enumerate(ratios) if cr == 4]
+        c128_idx = [i for i, cr in enumerate(ratios) if cr == 128]
+        all_idx = list(range(arch.num_layers))
+
         groups: list[KVCacheGroupSpec] = []
 
         for info in bc.build_kv_cache_groups():
             name, bs, _page, nlayers = info.name, info.block_size, info.page_bytes, info.layer_count
-            layer_names = [f"model.layers.{i}.self_attn" for i in range(nlayers)]
 
             if name == "swa":
                 # Target SWA layers (0..num_layers-1) + MTP draft SWA layer(s)
                 # (num_layers..num_layers+num_mtp_layers-1) when spec is on.
                 swa_layer_names = [
-                    f"model.layers.{i}.self_attn"
+                    f"model.layers.{i}.attn.swa_cache"
                     for i in range(arch.num_layers + num_mtp_layers)
                 ]
                 groups.append(KVCacheGroupSpec(
@@ -73,7 +87,7 @@ class VLLMConfig:
                     )))
             elif name == "c4_compressor":
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.self_attn.compressor" for i in range(nlayers)],
+                    [f"model.layers.{i}.attn.compressor" for i in c4_idx],
                     SlidingWindowMLASpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=2048, dtype=_torch.float32,
@@ -81,7 +95,7 @@ class VLLMConfig:
                     )))
             elif name == "c128_compressor":
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.self_attn.compressor" for i in range(nlayers)],
+                    [f"model.layers.{i}.attn.compressor" for i in c128_idx],
                     SlidingWindowMLASpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=1024, dtype=_torch.float32,
@@ -89,8 +103,9 @@ class VLLMConfig:
                     )))
             elif name in ("c4_mla", "c128_mla"):
                 cr = 4 if name == "c4_mla" else 128
+                idx = c4_idx if name == "c4_mla" else c128_idx
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.self_attn" for i in range(nlayers)],
+                    [f"model.layers.{i}.attn" for i in idx],
                     MLAAttentionSpec(
                         block_size=bs, num_kv_heads=arch.num_kv_heads,
                         head_size=arch.head_size, dtype=kv_dtype,
@@ -102,7 +117,7 @@ class VLLMConfig:
                 # (attention.py:725-729 — fp4 uses same allocation, half unused)
                 idx_hd = 132
                 groups.append(KVCacheGroupSpec(
-                    [f"model.layers.{i}.self_attn.k_cache" for i in range(nlayers)],
+                    [f"model.layers.{i}.attn.indexer" for i in c4_idx],
                     MLAAttentionSpec(
                         block_size=bs, num_kv_heads=1,
                         head_size=idx_hd, dtype=_torch.uint8,
@@ -111,7 +126,7 @@ class VLLMConfig:
                     )))
             elif name == "full":
                 groups.append(KVCacheGroupSpec(
-                    layer_names,
+                    [f"model.layers.{i}.self_attn" for i in all_idx],
                     FullAttentionSpec(
                         block_size=bs,
                         num_kv_heads=arch.num_kv_heads,
