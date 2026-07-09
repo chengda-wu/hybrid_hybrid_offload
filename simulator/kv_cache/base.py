@@ -140,7 +140,7 @@ class KVBackend(ABC):
         """Per-pool utilization for backends with multiple physical pools.
 
         Returns a list of (pool_name, utilization_ratio) for backends that
-        split KV cache across independent pools (SGLang: swa/c4/c128), or
+        split KV cache across independent pools (SGLang: swa/full), or
         None for single-pool backends (vLLM shared block pool).  Used for
         end-of-run diagnostics; ``usage`` is the single aggregated number.
         """

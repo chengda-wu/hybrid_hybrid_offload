@@ -99,44 +99,63 @@ class SGLangBackend(KVBackend):
         self._backend_config = backend_config
         self._num_spec_tokens = num_spec_tokens
         self._page_size = sglang_cfg.page_size
+        # Base per-position caps from real SGLang's DSV4PoolConfigurator (one
+        # full slot / one swa slot per token position).  Stored for diagnostics
+        # and tests; the layer-slot caps below are derived from these.
+        self._full_token = sglang_cfg.full_token
+        self._swa_token = sglang_cfg.swa_token
 
-        # Single RadixCache allocator (one index per token).
-        total_slots = sglang_cfg.swa_tokens + sglang_cfg.c4_tokens + sglang_cfg.c128_tokens
+        # Single RadixCache allocator (one index per token position).  Real
+        # SGLang has two allocator index spaces (full_attn_allocator size=full,
+        # swa_attn_allocator size=swa); we collapse to one flat dispenser sized
+        # to their sum.  This is a generous, NON-binding cap — the per-pool
+        # check in allocate_slots is the real gate; the flat allocator only
+        # hands out indices and never independently OOMs.
+        total_slots = sglang_cfg.full_token + sglang_cfg.swa_token
         # on_free fires for every flat-index free (rejected tail in
         # free_rejected_slots, unaligned tail in free(), tree nodes in evict()).
-        # It deducts c4/c128 ONLY — NOT SWA.  SWA is decoupled: out-of-window
-        # SWA is returned by _reclaim_swa_out_of_window, in-window SWA at
-        # request finish (free) / rejection (free_rejected_slots).  This avoids
-        # the double-deduction where evict() of a tree node whose SWA was
-        # already reclaimed would otherwise subtract SWA a second time (real
-        # SWARadixCache prevents this via tombstoning reclaimed nodes before
-        # evict, swa_radix_cache.py:615 — we use plain RadixCache with no
-        # tombstones, so SWA must not flow through on_free).
+        # It deducts the FULL pool ONLY — NOT SWA.  SWA is decoupled: out-of-
+        # window SWA is returned by _reclaim_swa_out_of_window, in-window SWA
+        # at request finish (free) / rejection (free_rejected_slots).  This
+        # avoids the double-deduction where evict() of a tree node whose SWA
+        # was already reclaimed would otherwise subtract SWA a second time
+        # (real SWARadixCache prevents this via tombstoning reclaimed nodes
+        # before evict, swa_radix_cache.py:615 — we use plain RadixCache with
+        # no tombstones, so SWA must not flow through on_free).
         self._mock_allocator = MockTokenToKVPoolAllocator(
             total_slots,
             on_free=lambda n: self._deduct_pool_used(n),
         )
 
-        # Three-pool capacities in per-layer slot equivalents.
-        # Each token consumes swa_layers + c4_layers*2 + c128_layers slots.
-        self._pool_caps = [
-            sglang_cfg.swa_tokens,
-            sglang_cfg.c4_tokens,
-            sglang_cfg.c128_tokens,
-        ]
-        self._pool_used = [0, 0, 0]  # [swa, c4, c128] slots used
-        # Peak per-pool utilization observed over the run (high-water mark of
-        # _pool_used[i] / _pool_caps[i]).  End-state usage is ~0 (requests free
-        # on finish), so the peak is the informative number for diagnosing
-        # which pool bottlenecks first (e.g. SWA ring vs c128 full KV).
-        self._pool_peak: list[int] = [0, 0, 0]
+        # Two-pool model [swa, full] matching real SGLang's get_max_pool_usage
+        # (pool_stats_observer.py:64-71: max(full, swa)).  c4/c128 are NOT
+        # independent pools — they are sub-allocated in lockstep from the
+        # unified full pool (allocator/swa.py:20-78 SWATokenToKVPoolAllocator
+        # has exactly two sub-allocators: full + swa).  Charging c4+c128
+        # together against one ``full`` cap makes the full pool bind at
+        # ``full_token`` positions, matching real SGLang; the previous
+        # 3-independent-pool model bound c128 at full/128 (128× too early).
         arch = backend_config.model_arch
         self._swa_per_tok = arch.num_layers
         self._c4_per_tok = (sum(1 for cr in (arch.compress_ratios or []) if cr == 4) * 2)
         self._c128_per_tok = sum(1 for cr in (arch.compress_ratios or []) if cr == 128)
-        self._pool_names = ["swa", "c4", "c128"]
+        self._full_per_tok = self._c4_per_tok + self._c128_per_tok
+        # Caps in per-layer slot equivalents (cap = base_positions × per_tok).
+        # Ratio (used·per_tok)/cap is unit-invariant, so usage = max(swa, full)
+        # mirrors real SGLang's token-usage ratios.
+        self._pool_caps = [
+            sglang_cfg.swa_token * self._swa_per_tok,
+            sglang_cfg.full_token * self._full_per_tok,
+        ]
+        self._pool_used = [0, 0]  # [swa, full] slots used
+        # Peak per-pool utilization observed over the run (high-water mark of
+        # _pool_used[i] / _pool_caps[i]).  End-state usage is ~0 (requests free
+        # on finish), so the peak is the informative number for diagnosing
+        # which pool bottlenecks first (SWA ring vs full KV).
+        self._pool_peak: list[int] = [0, 0]
+        self._pool_names = ["swa", "full"]
         self._pool_per_tok = [
-            self._swa_per_tok, self._c4_per_tok, self._c128_per_tok,
+            self._swa_per_tok, self._full_per_tok,
         ]
         # SWA sliding window (HF sliding_window; 128 for DSV4).  Real SGLang
         # frees SWA slots once they leave the window (see
@@ -218,15 +237,17 @@ class SGLangBackend(KVBackend):
         if to_alloc <= 0:
             return torch.tensor([], dtype=torch.int64)
 
-        # Three-pool capacity check: each token consumes per-layer slots.
+        # Two-pool capacity check (swa, full).  c4+c128 are charged together
+        # against the unified full pool (they are sub-allocated in lockstep in
+        # real SGLang and never independently bind).  Each token consumes
+        # swa_layers SWA slots + (c4_layers*2 + c128_layers) full slots.
         swa_need = to_alloc * self._swa_per_tok
-        c4_need = to_alloc * self._c4_per_tok
-        c128_need = to_alloc * self._c128_per_tok
-        needs = [swa_need, c4_need, c128_need]
+        full_need = to_alloc * self._full_per_tok
+        needs = [swa_need, full_need]
 
         def _over_budget() -> list[int]:
             return [
-                i for i in range(3)
+                i for i in range(2)
                 if self._pool_used[i] + needs[i] > self._pool_caps[i]
             ]
 
@@ -266,11 +287,10 @@ class SGLangBackend(KVBackend):
 
         # Track per-pool slot usage
         self._pool_used[0] += swa_need
-        self._pool_used[1] += c4_need
-        self._pool_used[2] += c128_need
+        self._pool_used[1] += full_need
         # Update peak (allocs are the only place usage rises; frees/reclaims
         # only lower it, so checking here captures the high-water mark).
-        for i in range(3):
+        for i in range(2):
             if self._pool_used[i] > self._pool_peak[i]:
                 self._pool_peak[i] = self._pool_used[i]
         # Bill this request's SWA charged-token count (prefix-hit tokens are
@@ -282,22 +302,22 @@ class SGLangBackend(KVBackend):
         return new_indices
 
     def _deduct_pool_used(self, num_tokens: int) -> None:
-        """Decrement c4/c128 slot usage when flat indices are freed.
+        """Decrement the full pool when flat indices are freed.
 
-        SWA is intentionally NOT deducted here.  c4/c128 are full-retention
-        pools (no sliding-window reclamation), so a flat-index free corresponds
-        one-to-one to a c4/c128 slot return — whether from rejected-spec tail,
-        unaligned finish tail, or evict() of a cached tree node.  SWA differs:
-        out-of-window SWA is returned by _reclaim_swa_out_of_window and
-        in-window SWA at finish/rejection (see free / free_rejected_slots).
-        Routing SWA through this callback would double-deduct the reclaimed
-        portion when evict() later frees the same tree node (real SWARadixCache
-        avoids this via tombstones; we have none, so SWA stays out of on_free).
+        SWA is intentionally NOT deducted here.  The full pool (c4+c128) is
+        full-retention (no sliding-window reclamation), so a flat-index free
+        corresponds one-to-one to a full-slot return — whether from rejected-
+        spec tail, unaligned finish tail, or evict() of a cached tree node.
+        SWA differs: out-of-window SWA is returned by
+        _reclaim_swa_out_of_window and in-window SWA at finish/rejection (see
+        free / free_rejected_slots).  Routing SWA through this callback would
+        double-deduct the reclaimed portion when evict() later frees the same
+        tree node (real SWARadixCache avoids this via tombstones; we have none,
+        so SWA stays out of on_free).
         """
         if num_tokens <= 0:
             return
-        self._pool_used[1] = max(0, self._pool_used[1] - num_tokens * self._c4_per_tok)
-        self._pool_used[2] = max(0, self._pool_used[2] - num_tokens * self._c128_per_tok)
+        self._pool_used[1] = max(0, self._pool_used[1] - num_tokens * self._full_per_tok)
 
     def _reclaim_swa_out_of_window(self, sim_req: "SGLangSimRequest") -> None:
         """Return SWA slots outside the sliding window to the SWA sub-pool.
@@ -330,6 +350,29 @@ class SGLangBackend(KVBackend):
           + ``decode_batch_idx >= 1``.  Steady-state bound is identical.
         - No ``cache_protected_len`` floor: the charged-token cursor already
           keeps the live window untouched (threshold < charged − window).
+          Real SGLang floors ``new_cursor`` at ``cache_protected_len``
+          (common.py:84) to avoid reclaiming tree-held prefix SWA per-step;
+          the charged-token cursor achieves the same effect on the request's
+          own (post-prefix) region, because real's effective reclaim range
+          ``[cache_protected_len, seqlen)`` == the charged region.  So both
+          reclaim the request's out-of-window *new* tokens at the same point
+          (charged > sliding_window + page_size + 1).
+
+        Tree-held prefix SWA is intentionally NOT modeled.  Real SGLang's SWA
+        pool also holds the in-window SWA of cached radix prefix nodes
+        (~sliding_window×43 per node, reclaimed only via SWA-LRU tombstoning,
+        not per-step).  The simulator omits this term because: (a) it's
+        immaterial — ~0.1% of the SWA cap per cached prefix, and SWA is a tight
+        ring (0.1·full) that binds only under high concurrency with long
+        in-window tails, not from the omitted prefix term; (b) modeling
+        it correctly requires deduplicating shared prefixes across requests
+        (real SGLang's SWARadixCache tombstone + lock_ref machinery), which
+        the plain RadixCache used here has no analogue for.  Naively billing
+        each request's cache-hit prefix into ``_pool_used[0]`` (as a
+        full-sequence cursor would) DOUBLE-COUNTS: N requests sharing one
+        prefix would add N×prefix×43 instead of the real 1×prefix×43,
+        producing false OOM.  The charged-token design is self-consistent:
+        bill only what a request newly allocates, reclaim only what it billed.
         """
         charged = sim_req.swa_charged_tokens
         pre_len = charged - 1
@@ -423,7 +466,7 @@ class SGLangBackend(KVBackend):
             # fires, _allocated_indices is out of sync with the scheduler's
             # rejection count (e.g. a future multi-segment-per-step change) and
             # the rejected slots would silently leak — fail loudly instead of
-            # leaking both the flat indices and their c4/c128/SWA pool slots.
+            # leaking both the flat indices and their full/SWA pool slots.
             raise RuntimeError(
                 f"free_rejected_slots: only {len(flat)} allocated indices but "
                 f"asked to free {num_rejected} for request {sim_req.request_id}. "
@@ -447,7 +490,7 @@ class SGLangBackend(KVBackend):
         # Rejected/beyond tokens were billed to swa_charged_tokens (and
         # _pool_used[0]) in allocate_slots; drop them so the SWA reclaim
         # cursor stays consistent with actually-held tokens.  on_free now
-        # deducts only c4/c128, so deduct SWA explicitly here — the
+        # deducts only the full pool, so deduct SWA explicitly here — the
         # rejected tail is in-window (just allocated this step, reclaim
         # hasn't touched it), so its full SWA slots are returned.
         sim_req.swa_charged_tokens = max(
@@ -474,7 +517,7 @@ class SGLangBackend(KVBackend):
             self._cache.dec_lock_ref(sim_req._last_node)
             sim_req._last_node = None
 
-        # Free unaligned tail (on_free deducts c4/c128 only — NOT SWA).
+        # Free unaligned tail (on_free deducts the full pool only — NOT SWA).
         all_tokens = array(
             "q", sim_req.prompt_token_ids + sim_req.output_token_ids
         )
@@ -510,19 +553,19 @@ class SGLangBackend(KVBackend):
     def usage(self) -> float:
         # Bottleneck-pool utilization = max across pools, matching real SGLang's
         # get_max_pool_usage() (pool_stats_observer.py:64-71: max(full, swa,
-        # mamba)).  An average would mask the binding pool: SWA 95% / c4 30% /
-        # c128 20% averages to 48% (looks idle) but the SWA pool is about to
-        # OOM.  Max surfaces that pressure — it is what real SGLang reports to
-        # Prometheus and uses for admission throttling.  Per-pool detail remains
-        # available via pool_usage_detail() / pool_peak_detail().
+        # mamba)).  An average would mask the binding pool: SWA 95% / full 30%
+        # averages to 62% (looks fine) but the SWA pool is about to OOM.  Max
+        # surfaces that pressure — it is what real SGLang reports to Prometheus
+        # and uses for admission throttling.  Per-pool detail remains available
+        # via pool_usage_detail() / pool_peak_detail().
         ratios = [r for _, r in self.pool_usage_detail()]
         return max(ratios) if ratios else 0.0
 
     def pool_usage_detail(self) -> list[tuple[str, float]]:
-        # Per-pool utilization (swa/c4/c128).  Caps differ by orders of
-        # magnitude (SWA ring-bounded vs full KV), so the per-pool numbers
-        # are more informative than the aggregate ``usage`` — e.g. SWA
-        # nearing 1.0 while c128 is near 0 signals an SWA-pool bottleneck.
+        # Per-pool utilization (swa, full).  Caps differ by orders of magnitude
+        # (SWA ring-bounded at 0.1·full vs full KV), so the per-pool numbers are
+        # more informative than the aggregate ``usage`` — e.g. SWA nearing 1.0
+        # while full is near 0 signals an SWA-pool bottleneck.
         detail = []
         for name, used, cap in zip(
             self._pool_names, self._pool_used, self._pool_caps

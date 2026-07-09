@@ -229,7 +229,7 @@ class SimulatorScheduler:
         vLLM packs 6 KV groups (block sizes 4..256) into one shared pool, so
         "free blocks" is a pool-block count and demand far exceeds
         tokens / scheduler_block_size — we report the real cross-group demand.
-        SGLang fails on per-pool capacity (swa/c4/c128), not total free, so we
+        SGLang fails on per-pool capacity (swa/full), not total free, so we
         report which pool(s) are over budget.
         """
         free = self._backend.num_free_blocks
@@ -261,7 +261,7 @@ class SimulatorScheduler:
                 f"{req.request_id}: needs {num_new_tokens} new tokens "
                 f"(prompt={req.num_tokens}, cache_hit={num_computed}).  "
                 f"SGLang KV pool(s) over budget — {pool_lines}.  "
-                f"Note: SGLang fails on per-pool capacity (swa/c4/c128), "
+                f"Note: SGLang fails on per-pool capacity (swa/full), "
                 f"not total free ({free} token slots free).  {hint}"
             )
 

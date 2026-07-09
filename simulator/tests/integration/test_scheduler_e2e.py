@@ -157,10 +157,15 @@ class TestSchedulerE2E(unittest.TestCase):
         cfg = _config("sglang", num_spec_tokens=2)
         cfg.num_kv_cache_blocks = 1  # far too small for a 256-token prompt
         cfg.dataset.synthetic.prompt_length_fixed = 2048
-        engine = SimulationEngine(cfg)
+        # The too-small config may be rejected either at backend construction
+        # (real SGLang's DSV4PoolConfigurator raises "Not enough memory" when
+        # the spec-scaled full_token collapses to 0) or at first prefill (pool
+        # over budget).  Both are RuntimeError; both satisfy "raises, doesn't
+        # hang", so wrap construction inside the assert.
         with self.assertRaises(RuntimeError):
             with _HangTimeout(60):
                 with redirect_stdout(io.StringIO()):
+                    engine = SimulationEngine(cfg)
                     engine.run()
 
 

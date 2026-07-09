@@ -47,6 +47,10 @@ class ModelArchitecture:
 
     # KV options
     use_fp4_indexer: bool = False  # deepseek_v4_memory_pool.py:279-282
+    # DSV4 indexer head dim (HF config ``index_head_dim``; 128 for V4 Flash).
+    # Real SGLang reads it at pool_configurator.py:503; vLLM derives 132 B/token
+    # from it (128 + 128//128*4).  Defaults to 128 so DSV4 works without HF cfg.
+    indexer_head_dim: int = 128
 
     # Derived
     vocab_size: int = 129280
@@ -172,6 +176,7 @@ class ModelArchitecture:
             sliding_window=cfg.get("sliding_window"),
             vocab_size=cfg.get("vocab_size", 129280),
             use_fp4_indexer=cfg.get("enable_deepseek_v4_fp4_indexer", False),
+            indexer_head_dim=cfg.get("index_head_dim", 128),
             num_mtp_layers=cfg.get("num_nextn_predict_layers", 1),
         )
 

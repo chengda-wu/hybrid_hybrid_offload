@@ -202,9 +202,9 @@ class TestSwaNoDoubleDeduction(unittest.TestCase):
         for _ in range(40):
             backend._cache.evict(EvictParams(num_tokens=4096))
 
-        # All three pools must be fully drained — no SWA double-deduction
-        # residue (clamped negatives) and no c4/c128 leak.
-        self.assertEqual(backend._pool_used, [0, 0, 0],
+        # Both pools must be fully drained — no SWA double-deduction
+        # residue (clamped negatives) and no full (c4+c128) leak.
+        self.assertEqual(backend._pool_used, [0, 0],
                          f"pools not drained after free+evict: {backend._pool_used}")
 
     def test_swa_not_undercounted_when_other_request_still_live(self):
@@ -254,6 +254,72 @@ class TestSwaNoDoubleDeduction(unittest.TestCase):
         # Only 515 allocated, but ask to free 999 — far more than the tail.
         with self.assertRaises(RuntimeError):
             backend.free_rejected_slots(req, num_rejected=999)
+
+
+@requires_sglang
+class TestUnifiedFullPool(unittest.TestCase):
+    """The c4+c128 → unified ``full`` pool refactor.
+
+    Real SGLang tracks only two allocatable pools — ``full`` and ``swa``
+    (pool_stats_observer.py::get_max_pool_usage).  c4/c128 are sub-allocated in
+    lockstep from ``full`` and never independently bind.  The old 3-pool model
+    charged c128 at 20 layer-slots/token against a ``(full/128)*20`` cap, so
+    c128 bound at ``full/128`` positions — 128× too early.  The unified full
+    pool (c4+c128 charged together, cap = ``full_token * full_per_tok``) binds
+    at ``full_token`` positions, matching real SGLang.
+    """
+
+    def test_pool_shape_is_two_pools(self):
+        backend = _make_backend()
+        self.assertEqual(backend._pool_names, ["swa", "full"])
+        self.assertEqual(len(backend._pool_used), 2)
+        self.assertEqual(len(backend._pool_caps), 2)
+
+    def test_full_pool_binds_at_full_token_not_full_div_128(self):
+        """The fix: full cap / per_tok == full_token (was full/128 for c128)."""
+        backend = _make_backend(num_blocks=100)
+        full_per_tok = backend._full_per_tok
+        full_cap = backend._pool_caps[1]
+        # Binding point in token positions = cap / per_tok.
+        self.assertEqual(full_cap // full_per_tok, backend._full_token)
+        # The OLD c128 pool bound at full/128 — 128× earlier.  Confirm the new
+        # full pool holds 128× more positions than that old c128 binding point.
+        old_c128_bind = backend._full_token // 128
+        self.assertEqual((full_cap // full_per_tok) // old_c128_bind, 128)
+
+    def test_c128_no_longer_prematurely_ooms(self):
+        """A prefill between old-c128-cap and full-cap succeeds now.
+
+        num_blocks=100 → full_token=25600, swa_token=2560, old c128 bound at
+        full/128=200 positions.  A 500-token prefill is above the old c128 cap
+        (would have OOM'd) but below swa_token and full_token, so it must
+        succeed under the unified full pool.
+        """
+        backend = _make_backend(num_blocks=100)
+        self.assertEqual(backend._full_token, 25600)
+        req = backend.create_request("r1", list(range(500)), max_tokens=10)
+        backend.register_request(req)
+        indices = backend.allocate_slots(req, num_new_tokens=500)
+        self.assertIsNotNone(indices, "500-token prefill should fit under the "
+                                        "unified full pool (old c128 OOM'd at 200)")
+        self.assertEqual(len(indices), 500)
+        # full pool charged c4+c128 layer-slots; swa charged num_layers each.
+        self.assertEqual(backend._pool_used[1], 500 * backend._full_per_tok)
+        self.assertEqual(backend._pool_used[0], 500 * backend._swa_per_tok)
+
+    def test_usage_is_max_of_swa_and_full(self):
+        backend = _make_backend(num_blocks=100)
+        req = backend.create_request("r1", list(range(500)), max_tokens=10)
+        backend.register_request(req)
+        backend.allocate_slots(req, num_new_tokens=500)
+        detail = dict(backend.pool_usage_detail())
+        self.assertEqual(set(detail.keys()), {"swa", "full"})
+        self.assertAlmostEqual(backend.usage, max(detail.values()))
+        # Each ratio == (used * per_tok) / cap, unit-invariant.
+        swa_ratio = (500 * backend._swa_per_tok) / backend._pool_caps[0]
+        full_ratio = (500 * backend._full_per_tok) / backend._pool_caps[1]
+        self.assertAlmostEqual(detail["swa"], swa_ratio)
+        self.assertAlmostEqual(detail["full"], full_ratio)
 
 
 if __name__ == "__main__":

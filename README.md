@@ -373,7 +373,7 @@ python -m simulator.run --config real_trace.json -o real_result.json
 
 - **测试覆盖**：31 个 unittest 覆盖 acceptance / GPU perf / SGLang allocate / scheduler E2E（`simulator/tests/`，含 `integration/test_scheduler_e2e.py` 跑两后端 spec-on/off 全流程，断言吞吐/逐位置接受率/壁钟时间字段，带 wall-clock timeout 防 hang）。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
-- **无抢占**：**prefill** 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。**decode** 分配失败时跳过该步（不推进该请求，不抛错）——SWA 滑窗回收让 decode 占用基本稳定，此路径极难触发，但若并发极高且 cache 极小，理论上一致跳过会让请求卡死（真实引擎会 preempt 而非跳过）。OOM 报错信息按后端区分：vLLM 报"跨组 pool block 真实需求"，SGLang 报"哪个池(sw a/c4/c128)超容+used/need/cap"。
+- **无抢占**：**prefill** 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。**decode** 分配失败时跳过该步（不推进该请求，不抛错）——SWA 滑窗回收让 decode 占用基本稳定，此路径极难触发，但若并发极高且 cache 极小，理论上一致跳过会让请求卡死（真实引擎会 preempt 而非跳过）。OOM 报错信息按后端区分：vLLM 报"跨组 pool block 真实需求"，SGLang 报"哪个池(swa/full)超容+used/need/cap"。
 - **FP4 indexer**：通过 `--fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
