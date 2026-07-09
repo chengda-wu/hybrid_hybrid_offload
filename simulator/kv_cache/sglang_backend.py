@@ -597,20 +597,25 @@ class SGLangBackend(KVBackend):
         """Total KV cache bytes — matches real SGLang DSV4PoolConfigurator.
 
         Uses real SGLang DSV4PoolConfigurator formulas:
-          swa_tokens  = align(full_tokens * 0.1, page_size)
-          swa_slots   = swa_tokens // window_size(128)
+          swa_tokens  = align(full_tokens * swa_ratio, page_size)
+          swa_slots   = swa_tokens // window_size
           c4/c128 KV  = full_tokens // compress_ratio
           c4/c128 state = swa_slots * ring_size * state_bytes_per_token
           indexer KV  = c4 KV sized, 132 B/token
           indexer state = swa_slots * ring * state_bytes_per_token(2048)
+
+        ``full_tokens`` / ``swa_tokens`` reuse the configurator-derived base caps
+        computed in ``__init__`` (``self._full_token`` / ``self._swa_token``) so
+        this byte ledger stays consistent with the token-pool caps that drive
+        OOM — no second, hand-rolled ratio derivation.
         """
-        blocks = self._backend_config.num_kv_cache_blocks
+        arch = self._backend_config.model_arch
         page_size = self._page_size
-        scheduler_bs = self._backend_config.scheduler_block_size
-        swa_page_size = 128  # cfg.window_size; pool_configurator.py:470, HF sliding_window=128
+        swa_page_size = self._sliding_window  # cfg.window_size (pool_configurator.py:512)
 
         # Ring sizes — import from SGLang (module-level, no server_args needed).
-        # Spec mode doubles ring sizes (pool_configurator.py:514).
+        # Spec mode doubles ring sizes (pool_configurator.py:514).  Online c128
+        # collapses ring_size to 1 (get_compress_state_ring_size, memory_pool.py:34).
         is_spec = self._num_spec_tokens > 0
         from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
             get_compress_state_ring_size,
@@ -628,10 +633,10 @@ class SGLangBackend(KVBackend):
         )
         c4_dt, c128_dt = _get_dsv4_compress_state_dtype_sizes()
         # last_dim = 2*(1+overlap)*head_dim (deepseek_v4_compress_state.py:125),
-        # head_dim = attn_head_dim = 512 (pool_configurator.py:585).  c4 overlap=True
-        # (ring>1), c128 overlap=False (ring>1).  Both use head_dim=512, NOT the
-        # state_dim in the per-group KVGroupInfo (2048/1024) — that is a different
-        # quantity.  Matches pool_configurator.py:589-596.
+        # attn_head_dim = qk_nope + qk_rope = arch.head_size (pool_configurator.py:585).
+        # c4 overlap=True (ring>1), c128 overlap=False (ring>1).  Both use
+        # attn_head_dim, NOT the state_dim in KVGroupInfo (2048/1024) — a
+        # different quantity.  Matches pool_configurator.py:589-596.
         # Online compress (SGLANG_OPT_USE_ONLINE_COMPRESS) changes c128 from
         # (kv, score) = 2*head_dim to (max, sum, kv) = 3*head_dim per slot
         # (pool_configurator.py:593-596).  Read the real flag so total_bytes
@@ -639,21 +644,20 @@ class SGLangBackend(KVBackend):
         # undercounted by ~50%).
         from sglang.srt.environ import envs
         c128_online = envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
-        c4_state_bytes = 2 * 2 * 512 * c4_dt      # last_dim = 2*2*512 = 2048
+        head_dim = arch.head_size
+        indexer_hd = arch.indexer_head_dim
+        c4_state_bytes = 2 * 2 * head_dim * c4_dt      # last_dim = 2*2*head_dim
         c128_state_bytes = (
-            (3 if c128_online else 2 * 1) * 512 * c128_dt
+            (3 if c128_online else 2 * 1) * head_dim * c128_dt
         )
-        idx_state_bytes = 2 * 2 * 128 * c4_dt     # indexer uses c4 dtype
+        idx_state_bytes = 2 * 2 * indexer_hd * c4_dt   # indexer uses c4 dtype
 
-        # spec mode: draft worker scaling (pool_configurator.py:538-545),
-        # applied consistently to both pool_caps (SGLangConfig) and total_bytes here.
-        # Use arch.num_layers (not a literal 43) so pool_caps and total_bytes
-        # stay consistent for non-43-layer models — matches sglang_config.py:48.
-        full_tokens = blocks * scheduler_bs
-        if self._num_spec_tokens > 0:
-            nl = self._backend_config.model_arch.num_layers
-            full_tokens = (full_tokens * nl // (nl + 1) // page_size) * page_size
-        swa_tokens = (int(full_tokens * 0.1) // page_size) * page_size
+        # Base token caps come from the real configurator (self._full_token /
+        # self._swa_token), already spec-(T+D)/T-scaled and page-aligned in
+        # __init__ — reuse them verbatim so the byte ledger matches the OOM-
+        # driving pool caps exactly (no second ratio derivation to drift).
+        full_tokens = self._full_token
+        swa_tokens = self._swa_token
         swa_slots = swa_tokens // swa_page_size
 
         def _sglang_page_count(size: int, page: int) -> int:
@@ -682,8 +686,24 @@ class SGLangBackend(KVBackend):
                 state_tokens = -(-(raw + c4_ring + 1) // 4) * 4
                 group_bytes = state_tokens * c4_state_bytes * info.layer_count
             elif info.name == "c128_compressor":
+                # CompressStatePool sizing (deepseek_v4_compress_state.py:106-124):
+                #   offline: _size = ceil(size + ring + 1, ratio) * ratio  (pad to ratio)
+                #   online:  _logical_size = size + ring + 1  (NO ratio padding);
+                #            _size = _logical_size * (1 + online_mtp_max_draft_tokens)
+                #            (online_mtp only when SGLANG_EXPERIMENTAL_ONLINE_C128_MTP,
+                #             pool_configurator.py:601-602,515-517).  c4 is always
+                #             offline (online flag is ratio==128 only, memory_pool.py:813).
                 raw = swa_slots * c128_ring
-                state_tokens = -(-(raw + c128_ring + 1) // 128) * 128
+                if c128_online:
+                    state_tokens = raw + c128_ring + 1
+                    if envs.SGLANG_EXPERIMENTAL_ONLINE_C128_MTP.get():
+                        # max_speculative_num_draft_tokens (configurator:515-517);
+                        # the mock server_args passes None → 0 in the configurator,
+                        # so this is 0 unless a draft-token count is configured.
+                        online_mtp = self._num_spec_tokens or 0
+                        state_tokens *= (1 + online_mtp)
+                else:
+                    state_tokens = -(-(raw + c128_ring + 1) // 128) * 128
                 group_bytes = state_tokens * c128_state_bytes * info.layer_count
             elif info.name == "c4_indexer":
                 # DeepSeekV4IndexerPool._create_buffer: no 576 padding.
