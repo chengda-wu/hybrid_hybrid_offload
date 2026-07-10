@@ -92,16 +92,38 @@ class SGLangConfig:
             window_size=arch.sliding_window,  # 128 → swa_page_size
         )
         is_spec = num_spec > 0
+
+        # Online c128 + experimental online-c128-MTP path.  Real SGLang gates
+        # this on spec_algorithm.is_eagle() (pool_configurator.py:556-565
+        # asserts; MTP spec is rejected).  The simulator models MTP, not EAGLE,
+        # but the online-c128-MTP *byte cost* (extra draft-state banks in
+        # DeepSeekV4CompressStatePool) depends only on the draft-token count,
+        # not the spec algorithm.  When the user enables BOTH experimental env
+        # flags with spec on, report is_eagle()=True and pass the draft count
+        # so (a) the configurator's assert passes instead of crashing at
+        # construction, and (b) total_bytes' MTP multiplier (which uses
+        # num_spec_tokens) stays consistent with the configurator's sizing.
+        # Online compress + spec WITHOUT the MTP flag still crashes — faithful
+        # to real SGLang, which also rejects that combination.
+        from sglang.srt.environ import envs
+        online_mtp_path = (
+            is_spec
+            and envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()
+            and envs.SGLANG_EXPERIMENTAL_ONLINE_C128_MTP.get()
+        )
         sa = SimpleNamespace(
-            swa_full_tokens_ratio=0.1,  # DSV4 override (deepseek_v4_hook.py:57)
+            swa_full_tokens_ratio=bc.swa_full_tokens_ratio,  # DSV4 hook override
             speculative_algorithm="MTP" if is_spec else None,
-            max_speculative_num_draft_tokens=None,
+            max_speculative_num_draft_tokens=(
+                num_spec if online_mtp_path else None
+            ),
         )
         # spec_algorithm is only read when SGLANG_OPT_USE_ONLINE_COMPRESS env is
-        # set (default off); provide a minimal namespace as insurance.
+        # set (default off); is_eagle() is forced True only on the experimental
+        # online-c128-MTP path (see above).
         spec_algorithm = SimpleNamespace(
             is_none=lambda: not is_spec,
-            is_eagle=lambda: False,
+            is_eagle=lambda: online_mtp_path,
         )
         mr = SimpleNamespace(
             model_config=mc,

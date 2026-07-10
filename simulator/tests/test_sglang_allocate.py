@@ -10,6 +10,15 @@ requires_sglang = unittest.skipUnless(
     _HAS_SGLANG and _HAS_TORCH, "requires sglang+torch"
 )
 
+# Force-import deepseek_v4_memory_pool NOW (clean env, at collection time) so
+# its module-level constant ``ONLINE_C128 = ... envs.SGLANG_OPT_USE_ONLINE_COMPRESS.get()``
+# (memory_pool.py:27) is cached as False before any test toggles that env var.
+# Without this, TestKvBytesAndRatioDerived.test_online_c128_mtp_path_does_not_crash
+# would import the module with the flag set, poisoning ONLINE_C128=True for the
+# whole process and making test_total_bytes see an inconsistent ring size.
+if _HAS_SGLANG:
+    import sglang.srt.mem_cache.deepseek_v4_memory_pool  # noqa: F401
+
 from simulator.config.model_config import (
     KVBackendConfig,
     ModelArchitecture,
@@ -320,6 +329,120 @@ class TestUnifiedFullPool(unittest.TestCase):
         full_ratio = (500 * backend._full_per_tok) / backend._pool_caps[1]
         self.assertAlmostEqual(detail["swa"], swa_ratio)
         self.assertAlmostEqual(detail["full"], full_ratio)
+
+
+@requires_sglang
+class TestKvBytesAndRatioDerived(unittest.TestCase):
+    """Round-8 fixes: kv_bytes derived from arch (not hardcoded 584),
+    swa_full_tokens_ratio configurable, online-c128-MTP mock no longer crashes.
+
+    Real SGLang computes ``kv_bytes = qk_nope + qk_rope*2 + 8``
+    (pool_configurator.py:578); since ``qk_nope = head_size - qk_rope`` this is
+    ``head_size + qk_rope + 8``.  The simulator must derive it (not hardcode
+    584) so a future MLA model with a different RoPE head dim is priced right.
+    """
+
+    def test_kv_bytes_per_token_matches_dsv4(self):
+        arch = ModelArchitecture.deepseek_v4_flash()
+        # 512 + 64 + 8 = 584 (the old hardcoded literal).
+        self.assertEqual(arch.kv_bytes_per_token, 584)
+
+    def test_kv_bytes_derived_for_non_dsv4_rope_dim(self):
+        # A hypothetical MLA model with qk_rope=32, head_size=448 (qk_nope=416).
+        # Real formula: 416 + 32*2 + 8 = 488.  Hardcoded 584 would over-count.
+        arch = ModelArchitecture.deepseek_v4_flash()
+        arch.qk_rope_head_dim = 32
+        arch.head_size = 448  # qk_nope = 416
+        self.assertEqual(arch.kv_bytes_per_token, 448 + 32 + 8)
+        self.assertNotEqual(arch.kv_bytes_per_token, 584)
+
+    def test_total_bytes_byte_identical_to_hardcoded_for_dsv4(self):
+        # Deriving kv_bytes must not change DSV4's reported allocation.
+        # Guard against env leakage from order-dependent tests: total_bytes
+        # depends on SGLANG_OPT_USE_ONLINE_COMPRESS, so force the default off.
+        import os
+        from unittest.mock import patch
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SGLANG_OPT_USE_ONLINE_COMPRESS", None)
+            os.environ.pop("SGLANG_EXPERIMENTAL_ONLINE_C128_MTP", None)
+            backend = _make_backend()
+            # spec-off: 15.5855 GiB (the pre-derivation value).
+            self.assertAlmostEqual(backend.total_bytes / 2**30, 15.5855, places=3)
+
+    def test_swa_full_tokens_ratio_is_configurable(self):
+        """swa_token tracks bc.swa_full_tokens_ratio (was hardcoded 0.1)."""
+        from simulator.config.sglang_config import SGLangConfig
+
+        arch = ModelArchitecture.deepseek_v4_flash()
+        bsizes = [g[1] for g in arch.layer_groups]
+        lcm = bsizes[0]
+        for bs in bsizes[1:]:
+            lcm = lcm * bs // math.gcd(lcm, bs)
+
+        def cfg_for(ratio):
+            bc = KVBackendConfig(
+                model_arch=arch, block_size=max(bsizes),
+                hash_block_size=bsizes[0], scheduler_block_size=lcm,
+                num_kv_cache_blocks=4096, swa_full_tokens_ratio=ratio,
+            )
+            return SGLangConfig.from_backend_config(bc)
+
+        # 0.2 → swa_token roughly 2× the 0.1 value; 0.05 → roughly half.
+        c10 = cfg_for(0.1)
+        c20 = cfg_for(0.2)
+        c05 = cfg_for(0.05)
+        self.assertAlmostEqual(c20.swa_token / c10.swa_token, 2.0, places=1)
+        self.assertAlmostEqual(c10.swa_token / c05.swa_token, 2.0, places=1)
+        # full_token is independent of the SWA ratio.
+        self.assertEqual(c10.full_token, c20.full_token)
+
+    def test_online_c128_mtp_path_does_not_crash(self):
+        """spec-on + both experimental env flags must not crash at construction.
+
+        Pre-fix the configurator asserted (real SGLang rejects MTP spec on the
+        online-compress path; only the experimental EAGLE topk=1 path is
+        allowed).  The mock now reports is_eagle()=True + the draft count on
+        this path so the assert passes and total_bytes' MTP multiplier becomes
+        reachable.  Online-compress + spec WITHOUT the MTP flag still raises —
+        faithful to real SGLang.
+        """
+        import os
+        from unittest.mock import patch
+        from simulator.config.sglang_config import SGLangConfig
+
+        arch = ModelArchitecture.deepseek_v4_flash()
+        bsizes = [g[1] for g in arch.layer_groups]
+        lcm = bsizes[0]
+        for bs in bsizes[1:]:
+            lcm = lcm * bs // math.gcd(lcm, bs)
+
+        def bc(spec):
+            return KVBackendConfig(
+                model_arch=arch, block_size=max(bsizes),
+                hash_block_size=bsizes[0], scheduler_block_size=lcm,
+                num_kv_cache_blocks=4096, num_spec_tokens=spec,
+            )
+
+        # Both flags + spec on → must construct without raising.
+        with patch.dict(os.environ, {
+            "SGLANG_OPT_USE_ONLINE_COMPRESS": "1",
+            "SGLANG_EXPERIMENTAL_ONLINE_C128_MTP": "1",
+        }, clear=False):
+            SGLangConfig.from_backend_config(bc(spec=2))  # no raise
+
+        # patch.dict restores env on exit; confirm the flag is genuinely unset
+        # afterward (no leakage into later tests).
+        self.assertNotIn("SGLANG_OPT_USE_ONLINE_COMPRESS", os.environ)
+
+        # Online compress + spec WITHOUT the MTP flag → still raises (faithful
+        # to real SGLang rejecting MTP on this path).
+        with patch.dict(os.environ, {
+            "SGLANG_OPT_USE_ONLINE_COMPRESS": "1",
+        }, clear=False):
+            os.environ.pop("SGLANG_EXPERIMENTAL_ONLINE_C128_MTP", None)
+            with self.assertRaises(AssertionError):
+                SGLangConfig.from_backend_config(bc(spec=2))
 
 
 if __name__ == "__main__":

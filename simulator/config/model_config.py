@@ -67,6 +67,19 @@ class ModelArchitecture:
             self.compress_ratios = [self.compress_ratio] * self.num_layers
 
     @property
+    def kv_bytes_per_token(self) -> int:
+        """Per-token KV bytes for the MLA fp8_ds_mla (UE8M0) layout.
+
+        = ``qk_nope + qk_rope*2 + 8`` (SGLang ``pool_configurator.py:578``;
+        vLLM uses the same cost).  Since ``qk_nope = head_size - qk_rope``,
+        this simplifies to ``head_size + qk_rope + 8``.  For DSV4 Flash:
+        512 + 64 + 8 = 584.  Deriving (not hardcoding 584) keeps the cost
+        correct for any future MLA model with a different RoPE head dim.
+        """
+        qk_rope = self.qk_rope_head_dim or 64
+        return self.head_size + qk_rope + 8
+
+    @property
     def layer_groups(self) -> list[tuple[str, int, int, int]]:
         """Return KV cache layer groups for hybrid MLA models.
 
@@ -238,6 +251,10 @@ class KVBackendConfig:
     kv_cache_dtype: str = "auto"
     model_version: str = "deepseek_v4"
     num_spec_tokens: int = 0
+    # SGLang DSV4 SWA/full token ratio (deepseek_v4_hook.py:57 overrides the
+    # SGLang default 0.0 to 0.1).  Exposed so the SWA pool share is tunable
+    # without editing source; the configurator reads it via the mock below.
+    swa_full_tokens_ratio: float = 0.1
 
     @property
     def num_kv_cache_groups(self) -> int:
@@ -292,7 +309,8 @@ def _build_kv_cache_groups(bc: KVBackendConfig) -> list[KVGroupInfo]:
     groups: list[KVGroupInfo] = []
 
     # 1. SWA (attention.py:290), all layers
-    groups.append(KVGroupInfo("swa", 64, 64 * 584, arch.num_layers))
+    kv_bytes = arch.kv_bytes_per_token  # qk_nope + qk_rope*2 + 8 (584 for DSV4)
+    groups.append(KVGroupInfo("swa", 64, 64 * kv_bytes, arch.num_layers))
 
     # 2. C4 Compressor (compressor.py:150): bs=4, float32, state_dim=2048
     if c4_layers:
@@ -304,13 +322,13 @@ def _build_kv_cache_groups(bc: KVBackendConfig) -> list[KVGroupInfo]:
         groups.append(KVGroupInfo(
             "c128_compressor", 8, 8 * 1024 * 4, len(c128_layers)))
 
-    # 4. C4 Main MLA (attention.py:601): bs=256, cr=4, 584 B/token
+    # 4. C4 Main MLA (attention.py:601): bs=256, cr=4 -> 64 effective tok/block
     if c4_layers:
-        groups.append(KVGroupInfo("c4_mla", 256, 64 * 584, len(c4_layers)))
+        groups.append(KVGroupInfo("c4_mla", 256, 64 * kv_bytes, len(c4_layers)))
 
-    # 5. C128 Main MLA: bs=256, cr=128, 584 B/token
+    # 5. C128 Main MLA: bs=256, cr=128 -> 2 effective tok/block
     if c128_layers:
-        groups.append(KVGroupInfo("c128_mla", 256, 2 * 584, len(c128_layers)))
+        groups.append(KVGroupInfo("c128_mla", 256, 2 * kv_bytes, len(c128_layers)))
 
     # 6. C4 Indexer (attention.py:643-655): 132 B/token
     if c4_layers:

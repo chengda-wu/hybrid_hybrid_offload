@@ -624,8 +624,10 @@ class SGLangBackend(KVBackend):
         c128_ring = get_compress_state_ring_size(128, is_speculative=is_spec)
 
         # Per-token byte costs from SGLang (pool_configurator.py:578-594).
-        # kv_bytes = qk_nope + qk_rope*2 + 8 (fp8_ds_mla UE8M0 layout)
-        kv_bytes = 584
+        # kv_bytes = qk_nope + qk_rope*2 + 8 (fp8_ds_mla UE8M0 layout) =
+        # head_size + qk_rope + 8 (584 for DSV4).  Derived from the arch so a
+        # future MLA model with a different RoPE head dim is priced correctly.
+        kv_bytes = arch.kv_bytes_per_token
         # dtype sizes from _get_dsv4_compress_state_dtype_sizes()
         # (pool_configurator.py:74-88, default float32→4)
         from sglang.srt.model_executor.pool_configurator import (
@@ -727,14 +729,15 @@ class SGLangBackend(KVBackend):
             else:
                 # Main KV (c4_mla / c128_mla / full): ceil_div(size, page) pages.
                 # storage_bs = page_bytes // per_token_bytes (tokens per storage
-                # block).  For DSV4 MLA groups per_token_bytes = 584 (kv_bytes),
-                # so page_bytes (64*584 or 2*584) divides evenly.  Derive
-                # per_token_bytes from the architecture rather than hardcoding
-                # 584 so a future non-MLA "full" group (page_bytes =
-                # 2*bs*kv_heads*head_size*dtype, not a multiple of 584) does
-                # not silently yield storage_bs=0 and a wrong size_tok.
+                # block).  For DSV4 MLA groups per_token_bytes = kv_bytes
+                # (head_size+qk_rope+8 = 584), so page_bytes (64*kv_bytes or
+                # 2*kv_bytes) divides evenly.  Derive per_token_bytes from the
+                # architecture rather than hardcoding so a future non-MLA "full"
+                # group (page_bytes = 2*bs*kv_heads*head_size*dtype, not a
+                # multiple of kv_bytes) does not silently yield storage_bs=0
+                # and a wrong size_tok.
                 if self._backend_config.model_arch.is_mla:
-                    per_token_bytes = kv_bytes  # 584
+                    per_token_bytes = kv_bytes  # arch.kv_bytes_per_token
                 else:
                     # _build_kv_cache_groups: full page_bytes =
                     # 2 * block_size * kv_heads * head_size * dtype_size(=2)
