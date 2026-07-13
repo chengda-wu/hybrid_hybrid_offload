@@ -188,7 +188,7 @@ $$
 
 **结论**：省量随 `D/W_eff` 增长。`D ≈ 5500`（约 `43×128`）时省约一半；`D` 更大省更多；`D` 很小（<几百）几乎不省。命分化越严重（D 越大），三角形收益越高。
 
-> **成本口径说明**：本节的"省比例"只计**计算轴**（token·层 hidden-state GEMM），对应 `swa-kv-offloading-analysis.md` 的"计算开销"轴。该文档把成本分三轴——DRAM 长期 KV 存储 / HBM 搬运 / 计算——本文的三角形只直接影响计算轴与 HBM 轴（少算 → 少读写），**不改变 DRAM 轴**（main MLA 压缩条目是否常驻由 APC 命中决定，与三角形无关）。本文 §13.1 的 skip-writeback 与 §15.5 方向 C 的收益主要落在 DRAM/写回轴（不重复写已缓存条目）而非计算轴——这也是方向 C"计算省量与基线持平、但写回更优"的口径依据（§15.5.2）。
+> **成本口径说明**：本节的"省比例"计**计算轴**（token·层 hidden-state GEMM，三角形的大头），对应 `swa-kv-offloading-analysis.md` 的"计算开销"轴。该文档把成本分三轴——DRAM 长期 KV 存储 / HBM 搬运 / 计算。各方案落在不同轴：**staircase** 省计算轴大头（本节）+ HBM 轴；**skip-writeback** 既省计算轴小头（main MLA compress GEMM，§13.2.2）又省写回/HBM 轴（不重复写已缓存条目）；**松绑 min** 不省计算轴（§13.2），价值在 APC 上报与关注点分离。三轴的完整对照见 §13.2.2 的计算总账。
 
 ---
 
@@ -206,20 +206,58 @@ $$
 
 > **三角形 ≠ 免实现**。当前代码即便 delta 的 main MLA 条目已缓存，仍重算写回（冗余）。三角形要成立，**先要实现 skip-writeback**：让 compressor 对"该 token 压缩条目已缓存"的 delta token 跳过 `save_partial_states` + `compress_norm_rope_store`。这一步本身就能省掉 delta 段的 main MLA 投影冗余（即使不做三角形也有收益）；加上三角形再省隐藏态逐层 GEMM。
 
-### 13.2 替代/更优方案：松绑全局 min 协议
+### 13.2 松绑全局 min 协议：不是省计算的替代方案，而是依赖 skip+staircase 的协议重构
 
-三角形的收益依赖 `D` 大（命中分化严重）。更根治的办法是**让 D 不要发生**：
+> ⚠️ **勘误**：早期版本曾把松绑全局 min 当作"消除 delta、100% 省计算的根治方案"。该判断**不成立**。松绑 min **不省计算**，且**必须**配合 skip-writeback + staircase 才能正确、高效。三者是**依赖栈**，不是三选一的替代方案。
 
-- DSV4 当前用全局 `find_longest_cache_hit`（强制 5 group 取 min，`coordinator.py:630`）。
-- G1–G4 是**末尾窗口型** cache（SWA ring / compressor state），其"命中"语义本应是"末尾 window 已在 ring 里"，而非"前缀块对齐命中"。把它们的命中从全局 min 协议摘出，或改用 `find_longest_cache_hit_per_group`（`coordinator.py:742`，当前仅 Mamba hybrid 用），让全局 `hit_length` 只由 G0（main MLA，整条覆盖）决定 → `hit_length = A`，delta 消失，无需重算。
+**松绑 min 做了什么**：DSV4 当前用全局 `find_longest_cache_hit`（5 group 取 min，`coordinator.py:630`）。把 SWA/compressor 的命中从全局 min 摘出，让 `hit_length` 只由 G0（main MLA）决定 → `hit_length = A`，`num_computed_tokens = A`，`num_new_tokens` 从 `[B,N)` 收缩为 `[A,N)`（`scheduler.py:799`）。
 
-| 方案 | 作用 | 收益 | 实现难度 |
-|---|---|---|---|
-| **松绑全局 min**（让 SWA/compressor 不拖低 hit_length） | 消除 delta（D→0） | 100% 省 delta 段 | 中（改命中协议/对齐语义） |
-| **skip-writeback**（已缓存压缩条目不重算） | 省 delta 的 main MLA 投影冗余 | 部分（即使无三角形） | 低-中（compressor 加 skip 判断） |
-| **三角形 staircase**（在 skip-writeback 基础上） | 省 delta 隐藏态逐层 GEMM | D≈5500 省 ~50%，D 更大更多 | 高（改调度+forward 计算图） |
+**松绑 min 没消除 delta 段的重建需求**：SWA cache 与 compressor state 都是**块哈希缓存**（`DeepseekV4SWACache` 返回 `SlidingWindowMLASpec`，`block_size=64`，`sparse_swa.py:32,85`；compressor 同理 `compressor.py:159`），其"命中到 B"意味着块 `[0,B)` 已缓存、`[B,A)` **未缓存**。松绑后 forward 只算 `[A,N)`，但位置 A 的 SWA 窗口 `[A−127, A]` 与 compressor 末尾 window 都**延伸进 `[B,A)`**——这段状态从未被填充 → **输出错误**，除非显式重建 `[B,A)` 的 SWA KV + compressor state。
 
-> 三者不互斥：松绑 min 消除大部分 delta；残余 delta（松绑后仍可能存在的、因 G0 自身部分未命中产生的回退）用 skip-writeback + 三角形兜底。
+**重建就是 delta 段问题本身**：要重建 `[B,A)` 的 SWA/compressor 状态，需要该段各层的 hidden state，而 hidden state 又依赖向低层扩张的依赖锥（§11.4 的 $R_\ell$）。这和未松绑时 delta 段 `[B,A)` 的重算**完全同构**：
+
+- 未松绑：scheduler 把 `[B,A)` 计入 `num_new_tokens`，forward 全量矩形重算（含冗余 main MLA）。
+- 松绑：`[B,A)` 不在 `num_new_tokens`，但 forward `[A,N)` 仍需重建 `[B,A)` 边界状态——同样的锥、同样的计算量。
+
+**因此松绑 min 的计算量与"未松绑 + staircase + skip"完全相同**：边界重建锥 $= W_{eff}\cdot L/2$（D≥$W_{eff}$ 时），与未松绑时在 delta 段上跑 staircase 一样。松绑只是把"delta 段重算"换个位置（从 `num_new_tokens` 内的冗余矩形，挪到显式边界重建），**计算量不减**。
+
+#### 13.2.1 三个方案是依赖栈，不是替代方案
+
+| 方案 | 作用 | 计算节省 | 依赖于 | 角色 |
+|---|---|---|---|---|
+| **skip-writeback** | 已缓存的 main MLA 压缩条目不重算 `compress_norm_rope_store` | `[B,A)` 的 main MLA compress GEMM（较小，但独立成立） | 无 | **基础** |
+| **staircase** | 边界/delta 段 hidden-state 三角形重算 | **大头**：hidden-state GEMM，D≈5500 省 ~50%（§12） | skip-writeback（§13.1 前提） | **主计算节省来源** |
+| **松绑全局 min** | `hit_length` 只由 G0 决定，`num_new_tokens=[A,N)` | **0**（边界重建 = 同一锥） | skip + staircase（否则错误或零收益） | **可选协议重构** |
+
+依赖方向（自下而上）：
+
+```
+松绑全局 min   ← 可选；零计算节省；价值在 APC 命中上报准确（A 而非 B）+ 关注点分离
+   ↑ 依赖（正确性 + 高效性）
+staircase      ← 计算节省大头（hidden-state GEMM，~50%@D=5500）
+   ↑ 依赖（前提）
+skip-writeback ← 计算节省小头（main MLA compress）+ staircase 的正确性前提
+```
+
+- **skip-writeback + staircase 可独立成立**（无需松绑）：直接在 delta 段 `[B,A)` 上做三角形 + skip 即可，计算节省与松绑后做边界重建**完全相同**。
+- **松绑 min 不能独立成立**：无边界重建 → 输出错误；全量矩形重建 → 正确但零节省（等同当前行为，白做）；只有 skip + staircase 重建 → 正确且高效。
+- **松绑 min 的真正价值**（非计算）：① APC 命中上报从 B 修正为 A，影响前缀缓存指标/驱逐/调度；② 把"缓存前缀的常规 forward `[A,N)`"与"显式边界重建 `[B,A)`"分离，架构更清晰，可能降低 skip+staircase 的正确实现难度。
+
+#### 13.2.2 计算节省的总账（用户关心的计算轴）
+
+设 delta `D = A−B`，`L=43`，$W_{eff}\approx 5462$。当前行为（无任何改动）的 delta 段计算 $= D\cdot L$（全量矩形，含冗余）。各方案的**计算**节省：
+
+| 方案组合 | delta 段计算 | vs 当前 `D·L` 省计算 |
+|---|---|---|
+| 当前（无改动） | `D·L`（矩形，含冗余 main MLA） | 基线 |
+| 仅 skip-writeback | `D·L`（hidden state 仍矩形）− main MLA compress 冗余 | 小（compress GEMM 部分） |
+| 仅 staircase（假设可行） | $\approx W_{eff}\cdot L/2$（D≥$W_{eff}$） | **~50%**（hidden-state GEMM 大头） |
+| skip + staircase | $\approx W_{eff}\cdot L/2$ − compress 冗余 | **~50% + compress 小头** |
+| 松绑 min + skip + staircase | $\approx W_{eff}\cdot L/2$ − compress 冗余（同一锥） | **同上**（松绑不减计算） |
+| 松绑 min 单独（全量矩形重建） | `D·L` | **0**（等同当前） |
+| 松绑 min 单独（不重建） | — | **错误**（输出不正确） |
+
+> **结论**：计算节省**全部来自 skip-writeback + staircase**，且与是否松绑 min **无关**。松绑 min 是零计算节省的协议重构，其采纳**以 skip+staircase 为前提**。文档先前的"松绑 min 消除 delta、100% 省"是把"协议层"误当成"计算层"收益。
 
 ### 13.3 不适用场景
 
@@ -393,7 +431,7 @@ W_eff(周期对) ≈ 128 + (21 − 1) · 254 ≈ 5208
 | A 浅层 + 深层三角 | 算满：略高于基线；只算必需：低于基线 | 算满 ✅ 浅层 / 只算必需 ❌ | 中 | 命中频繁用算满 |
 | B 周期 checkpoint | 不省计算 | 省 cache 内存 | 中 | ❌ 不解决计算 |
 | C 周期对三角 + C4 skip-writeback | 省 ~54%@D=5500（与基线持平） | ✅ C128 完整 | 高 | 计算持平、cache 更优 |
-| 松绑全局 min（§13.2） | 消除 delta | ✅ 完整 | 中 | ★ 根治 |
+| 松绑全局 min（§13.2） | 0 计算（协议重构） | ✅ 完整 | 中 | 依赖 skip+staircase |
 
 ### 15.7 小结
 
@@ -401,7 +439,7 @@ W_eff(周期对) ≈ 128 + (21 − 1) · 254 ≈ 5208
 2. **层间连续性**（§15.2）限制了"逐层独立选密集/稀疏"，只能按 (C4, C128) 周期对整体处理。
 3. **方向 C 的计算省量并非"75%"**：按周期对正确计算 `W_eff ≈ 5208`（非 2700），与原全三角形（5462）几乎相同，省量 ~54% vs ~50%，基本持平。周期对把高度从 43 层压到 21 对，但每对扩展翻倍（254 vs 127），两者抵消。
 4. **方向 C 的真正价值在写回/内存与 cache 复用**：C128 层 cr=128，全量写回也仅 840 条，近乎免费地保持 cache 完整以供后续命中复用；C4 层（28875 条主体）用三角形 + skip-writeback 省下。其中 **C4 层 skip-writeback 独立于三角形也成立**——即便不做三角形，让 compressor 对"压缩条目已缓存"的 delta token 跳过写回，就能省掉 C4 层 main MLA 投影冗余。
-5. **仍不如松绑全局 min**（直接消除 delta）。最优组合：**松绑 min 消除大部分 delta + 残余 delta 用 skip-writeback（+ 可选三角形）兜底**。
+5. **松绑全局 min 不省计算，且依赖 skip+staircase**（§13.2）：它把 `hit_length` 从 B 修正为 A，但 `[B,A)` 的 SWA/compressor 状态仍缺失，forward `[A,N)` 必须显式重建边界——同一依赖锥、同一计算量。计算节省全部来自 skip+staircase，与是否松绑无关；松绑是可选的协议重构（价值在 APC 上报准确 + 关注点分离），其采纳以 skip+staircase 为前提。
 
 ---
 
@@ -412,8 +450,9 @@ W_eff(周期对) ≈ 128 + (21 − 1) · 254 ≈ 5208
 3. **三角形在 delta 段成立**：因 main MLA 条目可 skip 写回 + SWA/compressor 都是滑窗（max window=128），靠前 delta token 在深层无任何读路径，隐藏态不需逐层穿透。有效穿透宽度 `W_eff ≈ L·128 ≈ 5500`（§11.3-11.5）。
 4. **省量随 D 增长**：`D ≈ 5500` 省约一半，`D` 更大省更多，`D` 很小不省（§12）。
 5. **前置条件**：须先实现 main MLA 压缩条目 skip-writeback（当前未实现）；否则三角形退化为矩形（§13.1）。
-6. **更优解**：松绑全局 min 协议（让 SWA/compressor 不拖低命中）可直接消除 delta，收益更彻底、实现更简单（§13.2）。
-7. **更优 staircase 变体（方向 C）的再评估**：DSV4 的 C4/C128 周期结构使 C128 层写回成本比 C4 低 34×（28875 vs 840 条）。但按 (C4, C128) 周期对正确计算，`W_eff ≈ 5208`（非早期误判的 2700），计算省量 ~54%——与原全三角形（~50%）基本持平，**并非"省 75%"**。方向 C 的真正价值在写回/内存与 cache 复用：C128 层近乎免费地保持 cache 完整供后续命中复用；C4 层的 skip-writeback（已缓存条目不重算写回）独立于三角形也成立。最优组合：松绑 min 消除大部分 delta + 残余 delta 用 skip-writeback（+ 可选周期对三角形）兜底（§15）。
+6. **松绑全局 min 不省计算，且依赖 skip+staircase**（§13.2 勘误）：松绑把 `hit_length` 从 B 修正为 A、`num_new_tokens` 收缩为 `[A,N)`，但 `[B,A)` 的 SWA/compressor 块未缓存，forward `[A,N)` 仍须显式重建边界状态——同一依赖锥、同一计算量。计算节省**全部来自 skip-writeback + staircase**，与是否松绑无关；松绑 min 是零计算节省的协议重构（价值在 APC 命中上报准确 + 关注点分离），其采纳以 skip+staircase 为前提（无重建则输出错误，全量矩形重建则零收益）。
+7. **更优 staircase 变体（方向 C）的再评估**：DSV4 的 C4/C128 周期结构使 C128 层写回成本比 C4 低 34×（28875 vs 840 条）。但按 (C4, C128) 周期对正确计算，`W_eff ≈ 5208`（非早期误判的 2700），计算省量 ~54%——与原全三角形（~50%）基本持平，**并非"省 75%"**。方向 C 的真正价值在写回/内存与 cache 复用：C128 层近乎免费地保持 cache 完整供后续命中复用；C4 层的 skip-writeback（已缓存条目不重算写回）独立于三角形也成立。
+8. **落地顺序（依赖栈）**：① skip-writeback（基础，独立省 main MLA compress 冗余）→ ② staircase（依赖 ①，省 hidden-state GEMM 大头，~50%@D=5500）→ ③ 松绑 min（可选，依赖 ①②，零计算节省但修正 APC 上报 + 分离关注点）。计算节省由 ①② 决定；③ 是可选的协议层。
 
 ---
 
