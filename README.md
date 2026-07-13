@@ -378,7 +378,7 @@ python -m simulator.run --config real_trace.json -o real_result.json
 - **FP4 indexer**：通过 `--use-fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
-- **SGLang 三池建模**：容量上限已按 SWA/C4/C128 三池独立校验（_pool_caps/_pool_used），C128 为最小池先满触发驱逐，无跨池借用。底层索引空间共享单一平坦 allocator（RadixCache 要求）。prefix 匹配不受影响，但内存压力模型是近似的——真实 SGLang 各池独立触发 OOM（如 C128 仅 8192 token 即满），sim 单池把三池容量混在一起，C128 用尽时可从 SWA/C4 配额"借"，cache_usage 和驱逐时机会偏离真实。常规负载（<10% 利用率）下影响可忽略，高压场景需注意。
+- **SGLang 二池建模**：容量按 SWA/full 二池校验（`_pool_caps`/`_pool_used`），c4/c128 从统一 full 池 lockstep 子分配，不会独立 OOM——与真实 SGLang `get_max_pool_usage`（`pool_stats_observer.py:64-71`：`max(full, swa)`）一致。使用率 = `max(swa_ratio, full_ratio)`，full 池在 `full_token` 位置绑定（旧的 SWA/C4/C128 三独立池模型把 c128 绑定在 `full/128`，比真实早 128×，是仿真伪影）。SWA 滑窗回收（`_reclaim_swa_out_of_window`）独立运作，不被 `on_free` 触及（保持与真实 `SWARadixCache` tombstone 语义的解耦）。
 
 ### 调度逻辑说明
 

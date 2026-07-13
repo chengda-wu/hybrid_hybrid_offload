@@ -171,5 +171,50 @@ class TestConfigModeCliOverrides(unittest.TestCase):
             Path(path).unlink()
 
 
+class TestDatasetFieldDefaultsAligned(unittest.TestCase):
+    """The CLI default, the SyntheticConfig dataclass default, and the
+    from_json default must agree for every dataset flag — otherwise the same
+    "default config" produces different behavior on the CLI path vs the
+    --config-with-omitted-key path.
+
+    This regression was found on output_length_fixed (CLI/README=256 vs
+    dataclass/from_json=512).  Sibling fields (prompt_length_fixed,
+    num_requests, shared_prefix_ratio) were already aligned; this test pins
+    all of them so the drift can't silently return.
+    """
+
+    def test_dataset_defaults_agree_across_cli_dataclass_and_from_json(self):
+        from simulator.run import _build_parser
+        from simulator.config.simulator_config import SyntheticConfig
+
+        p = _build_parser()
+        ns = p.parse_args([])  # all defaults
+        empty = _write_json({})
+        try:
+            cfg = SimulatorConfig.from_json(empty)
+        finally:
+            Path(empty).unlink()
+
+        cases = [
+            ("num_requests", ns.num_requests,
+             SyntheticConfig().num_requests, cfg.dataset.synthetic.num_requests),
+            ("prompt_length_fixed", ns.prompt_length,
+             SyntheticConfig().prompt_length_fixed,
+             cfg.dataset.synthetic.prompt_length_fixed),
+            ("output_length_fixed", ns.output_length,
+             SyntheticConfig().output_length_fixed,
+             cfg.dataset.synthetic.output_length_fixed),
+            ("shared_prefix_ratio", ns.shared_prefix_ratio,
+             SyntheticConfig().shared_prefix_ratio,
+             cfg.dataset.synthetic.shared_prefix_ratio),
+        ]
+        for name, cli, dataclass, from_json in cases:
+            with self.subTest(field=name):
+                self.assertEqual(cli, dataclass,
+                                 f"{name}: CLI default {cli} != dataclass default {dataclass}")
+                self.assertEqual(cli, from_json,
+                                 f"{name}: CLI default {cli} != from_json default {from_json}")
+
+
 if __name__ == "__main__":
     unittest.main()
