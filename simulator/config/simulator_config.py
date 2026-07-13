@@ -130,6 +130,12 @@ class SimulatorConfig:
 
     # Model options
     use_fp4_indexer: bool = False  # deepseek_v4 indexer fp4 mode
+    # SGLang DSV4 SWA/full token ratio (deepseek_v4_hook.py:57 overrides the
+    # SGLang default to 0.1).  Real SGLang's own default is 0.8 for hybrid MLA
+    # models without the DSV4 hook, so this MUST be configurable to stay
+    # correct for non-DSV4 hybrid models.  vLLM ignores it (it has no
+    # analogous knob — SWA sizing is implicit in the packed block pool).
+    swa_full_tokens_ratio: float = 0.1
 
     # Execution
     warmup_steps: int = 10  # steps to exclude from metrics
@@ -171,9 +177,23 @@ class SimulatorConfig:
         )
 
         spec_data = data.get("speculative", {})
+        # Cross-validate enabled vs num_spec_tokens.  The CLI binds
+        # ``enabled = num_spec_tokens > 0`` (run.py:43) — a single source of
+        # truth — but the JSON path parses the two fields independently.  An
+        # inconsistent JSON like ``{"enabled": false, "num_spec_tokens": 2}``
+        # would otherwise inflate the KV pool (engine reads num_spec_tokens,
+        # not enabled) while never running speculation — a silent ~2.3%
+        # over-allocation with no drafts generated.  ``enabled`` is the
+        # authoritative switch here (the user set it explicitly); when it is
+        # False, force num_spec_tokens=0 so pool sizing and the spec engine
+        # agree speculation is off.
+        spec_enabled = spec_data.get("enabled", True)
+        spec_num_tokens = spec_data.get("num_spec_tokens", 2)
+        if not spec_enabled:
+            spec_num_tokens = 0
         speculative = SpeculativeDecodeConfig(
-            enabled=spec_data.get("enabled", True),
-            num_spec_tokens=spec_data.get("num_spec_tokens", 2),
+            enabled=spec_enabled,
+            num_spec_tokens=spec_num_tokens,
             accept_mode=spec_data.get("accept_mode", "per_position"),
             acceptance_rate=spec_data.get("acceptance_rate", 0.85),
             acceptance_rates=spec_data.get("acceptance_rates"),
@@ -205,6 +225,7 @@ class SimulatorConfig:
             speculative=speculative,
             gpu_perf=gpu_perf,
             use_fp4_indexer=data.get("use_fp4_indexer", False),
+            swa_full_tokens_ratio=data.get("swa_full_tokens_ratio", 0.1),
             kv_cache_block_size=data.get("kv_cache_block_size", 16),
             hash_block_size=data.get("hash_block_size", 16),
             max_model_len=data.get("max_model_len", 8192),

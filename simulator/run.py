@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
             ),
             model_config_path=args.model_config,
             use_fp4_indexer=args.fp4_indexer,
+            swa_full_tokens_ratio=args.swa_ratio,
             kv_cache_block_size=args.kv_block_size,
             max_model_len=args.max_model_len,
             num_kv_cache_blocks=args.num_kv_blocks,
@@ -113,6 +114,12 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--model-config", type=str, help="Path to HF config.json")
     p.add_argument("--fp4-indexer", action="store_true",
                    help="Use fp4 indexer (68 B/token instead of 132)")
+    p.add_argument(
+        "--swa-ratio", type=float, default=0.1,
+        help="SGLang DSV4 SWA/full token ratio (deepseek_v4_hook.py:57 default "
+             "0.1). Raise for a larger SWA pool. vLLM ignores this. "
+        "JSON: swa_full_tokens_ratio.",
+    )
 
     # Execution
     p.add_argument("--seed", type=int, default=42)

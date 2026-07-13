@@ -63,6 +63,7 @@ class SimulationEngine:
             num_kv_cache_blocks=config.num_kv_cache_blocks,
             scheduler_block_size=scheduler_block_size_val,
             num_spec_tokens=config.speculative.num_spec_tokens,
+            swa_full_tokens_ratio=config.swa_full_tokens_ratio,
         )
 
         # Build components
