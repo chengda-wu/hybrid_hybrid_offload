@@ -92,9 +92,9 @@ def _override(config: SimulatorConfig, field: str, cli_value, default) -> None:
     """Set ``config.<field>`` to ``cli_value`` when it differs from default.
 
     In --config mode this applies a CLI override only when the user passed a
-    # non-default value (so a bare ``--config x.json`` doesn't clobber JSON
-    # with parser defaults).  In from-scratch mode every flag is set, so this
-    # also builds the full config from defaults.
+    non-default value (so a bare ``--config x.json`` doesn't clobber JSON with
+    parser defaults).  In from-scratch mode every flag is set, so this also
+    builds the full config from defaults.
     """
     if cli_value != default:
         setattr(config, field, cli_value)
@@ -120,7 +120,7 @@ def _build_parser() -> argparse.ArgumentParser:
     # Dataset
     p.add_argument("--num-requests", type=int, default=100)
     p.add_argument("--prompt-length", type=int, default=512)
-    p.add_argument("--output-length", type=int, default=512)
+    p.add_argument("--output-length", type=int, default=256)
     p.add_argument("--shared-prefix-ratio", type=float, default=0.5)
 
     # Speculative decode
