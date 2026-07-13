@@ -2,7 +2,7 @@
 
 F1 — ``swa_full_tokens_ratio`` (was hardcoded 0.1 in the mock server_args) is
 now exposed on ``SimulatorConfig``, parsed from JSON, overridable via the
-``--swa-ratio`` CLI flag, and threaded into ``KVBackendConfig``.
+``--swa-full-tokens-ratio`` CLI flag, and threaded into ``KVBackendConfig``.
 
 F2 — ``from_json`` now cross-validates ``speculative.enabled`` vs
 ``num_spec_tokens``.  Pre-fix an inconsistent JSON like
@@ -82,6 +82,93 @@ class TestSpecReconciliation(unittest.TestCase):
         cfg = SimulatorConfig.from_json(path)
         self.assertEqual(cfg.speculative.num_spec_tokens, 0)
         Path(path).unlink()
+
+
+class TestCliFlagNamesMatchJsonKeys(unittest.TestCase):
+    """Round-12 F1: every CLI flag is the kebab-case of its JSON field name.
+
+    Pre-fix the flags were ad-hoc abbreviations (--kv-block-size vs
+    kv_cache_block_size, --seed vs random_seed, --fp4-indexer vs
+    use_fp4_indexer, --swa-ratio vs swa_full_tokens_ratio, --model-config vs
+    model_config_path), so users couldn't predict the JSON key from the flag.
+    Now they map 1:1.  Old flag names are NOT accepted (no aliases).
+    """
+
+    def test_new_flag_names_parse(self):
+        from simulator.run import _build_parser
+        p = _build_parser()
+        ns = p.parse_args([
+            "--kv-cache-block-size", "8",
+            "--num-kv-cache-blocks", "1024",
+            "--model-config-path", "cfg.json",
+            "--use-fp4-indexer",
+            "--swa-full-tokens-ratio", "0.25",
+            "--random-seed", "7",
+            "--max-model-len", "4096",
+            "--stall-limit", "50",
+            "--verbose",
+        ])
+        self.assertEqual(ns.kv_cache_block_size, 8)
+        self.assertEqual(ns.num_kv_cache_blocks, 1024)
+        self.assertEqual(ns.model_config_path, "cfg.json")
+        self.assertTrue(ns.use_fp4_indexer)
+        self.assertAlmostEqual(ns.swa_full_tokens_ratio, 0.25)
+        self.assertEqual(ns.random_seed, 7)
+        self.assertTrue(ns.verbose)
+
+    def test_old_flag_names_rejected(self):
+        """No backward-compat aliases — old names must error out."""
+        from simulator.run import _build_parser
+        p = _build_parser()
+        for old in [
+            "--kv-block-size 16", "--num-kv-blocks 16", "--model-config x",
+            "--fp4-indexer", "--swa-ratio 0.1", "--seed 1",
+        ]:
+            with self.assertRaises(SystemExit):
+                p.parse_args(old.split())
+
+
+class TestConfigModeCliOverrides(unittest.TestCase):
+    """Round-12 F2: in --config mode, a non-default CLI flag overrides the
+    JSON value; a default CLI flag preserves the JSON value.
+
+    Pre-fix --config mode silently dropped every CLI flag except --use-fp4-
+    indexer, so ``--config x.json --swa-full-tokens-ratio 0.25`` was ignored.
+    """
+
+    def _cfg_with_swa(self, ratio: float) -> str:
+        return _write_json({
+            "backend": "vllm",
+            "swa_full_tokens_ratio": ratio,
+            "num_kv_cache_blocks": 4096,
+        })
+
+    def test_non_default_cli_flag_overrides_json(self):
+        import os
+        from simulator.run import _build_parser, _override
+        path = self._cfg_with_swa(0.1)
+        try:
+            p = _build_parser()
+            ns = p.parse_args(["--config", path, "--swa-full-tokens-ratio", "0.3"])
+            cfg = SimulatorConfig.from_json(path)
+            _override(cfg, "swa_full_tokens_ratio", ns.swa_full_tokens_ratio, 0.1)
+            self.assertAlmostEqual(cfg.swa_full_tokens_ratio, 0.3)
+        finally:
+            Path(path).unlink()
+
+    def test_default_cli_flag_preserves_json_value(self):
+        # JSON sets 0.2; the CLI flag is at its default 0.1, so the JSON value
+        # must NOT be clobbered.
+        from simulator.run import _build_parser, _override
+        path = self._cfg_with_swa(0.2)
+        try:
+            p = _build_parser()
+            ns = p.parse_args(["--config", path])
+            cfg = SimulatorConfig.from_json(path)
+            _override(cfg, "swa_full_tokens_ratio", ns.swa_full_tokens_ratio, 0.1)
+            self.assertAlmostEqual(cfg.swa_full_tokens_ratio, 0.2)
+        finally:
+            Path(path).unlink()
 
 
 if __name__ == "__main__":

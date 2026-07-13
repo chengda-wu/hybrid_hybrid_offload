@@ -33,11 +33,12 @@ python -m simulator.run [OPTIONS]
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `--backend` | `vllm` | KV cache 后端，`vllm` 或 `sglang` |
-| `--model-config` | — | HuggingFace `config.json` 路径。省略则使用 **DeepSeek V4 Flash** 硬编码默认值（43 层 MLA，512 维 head，SWA=2/C4=21/C128=20） |
+| `--model-config-path` | — | HuggingFace `config.json` 路径。省略则使用 **DeepSeek V4 Flash** 硬编码默认值（43 层 MLA，512 维 head，SWA=2/C4=21/C128=20） |
 | `--max-model-len` | `8192` | 模型最大上下文长度（token 数） |
-| `--kv-block-size` | `16` | KV cache 块大小（每个 block 包含的 token 数）。vLLM 按此粒度分配/匹配 |
-| `--num-kv-blocks` | `4096` | KV cache 块池总数。决定总可用缓存空间：`blocks × block_size × per_token_bytes` |
-| `--fp4-indexer` | off | 开关：DeepSeek V4 indexer 用 fp4（SGLang 下 68 B/token）而非 fp8（132 B/token）。vLLM 的 indexer 分配恒为 132 B/token（fp4 仅半数 slot 被用，分配不变），故此开关只影响 SGLang 的 `total_bytes`。也可在 JSON config 里设 `use_fp4_indexer: true` |
+| `--kv-cache-block-size` | `16` | KV cache 块大小（每个 block 包含的 token 数）。vLLM 按此粒度分配/匹配 |
+| `--num-kv-cache-blocks` | `4096` | KV cache 块池总数。决定总可用缓存空间：`blocks × block_size × per_token_bytes` |
+| `--use-fp4-indexer` | off | 开关：DeepSeek V4 indexer 用 fp4（SGLang 下 68 B/token）而非 fp8（132 B/token）。vLLM 的 indexer 分配恒为 132 B/token（fp4 仅半数 slot 被用，分配不变），故此开关只影响 SGLang 的 `total_bytes`。也可在 JSON config 里设 `use_fp4_indexer: true` |
+| `--swa-full-tokens-ratio` | `0.1` | SGLang DSV4 SWA/full token 比例（`deepseek_v4_hook.py:57` 覆盖为 0.1）。调大则 SWA 池更大。vLLM 忽略此参数。JSON: `swa_full_tokens_ratio` |
 
 #### 数据集
 
@@ -94,7 +95,7 @@ python -m simulator.run [OPTIONS]
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--seed` | `42` | 随机种子，保证合成数据和接受率采样的可复现性 |
+| `--random-seed` | `42` | 随机种子，保证合成数据和接受率采样的可复现性 |
 | `--output` / `-o` | — | 输出 JSON 报告路径。省略则打印到 stdout |
 | `--verbose` / `-v` | — | 打印每步调度日志（请求状态变化、prefill/decode 详情） |
 | `--config` | — | JSON 配置文件路径，可替代上述所有 CLI 参数。示例 6 展示了完整的配置文件格式 |
@@ -114,7 +115,7 @@ python -m simulator.run [OPTIONS]
 | `dataset.synthetic.prompt_length_dist` | `fixed` | `fixed`/`uniform`/`normal`（CLI 的 `--prompt-length` 只设 `fixed`） |
 | `dataset.synthetic.output_length_dist` | `fixed` | `fixed`/`uniform`（CLI 的 `--output-length` 只设 `fixed`） |
 
-> **CLI 与 config 关系**：CLI 参数只覆盖合成数据集 + 基础调度场景。真实数据集、到达模式、warmup、分布参数等需用 JSON config。`--config` 与 CLI 参数不混用（给了 `--config` 则忽略其它 CLI flag，除 `--fp4-indexer` 外）。
+> **CLI 与 config 关系**：CLI flag 名是 JSON 字段名的 kebab-case 版（如 `--kv-cache-block-size` ↔ `kv_cache_block_size`、`--swa-full-tokens-ratio` ↔ `swa_full_tokens_ratio`、`--random-seed` ↔ `random_seed`），逐字段 1:1 对应。给 `--config` 时，任何传了非默认值的 CLI flag 会覆盖 JSON 中对应字段（与 `--use-fp4-indexer` 一致）；CLI 只覆盖合成数据集 + 基础调度场景，真实数据集、到达模式、warmup、分布参数等需用 JSON config。
 
 ### 输出指标
 
@@ -209,12 +210,12 @@ SGLang（spec 默认 K=2）24.35 GB vs vLLM 9.74 GB（spec-on），差值 +14.61
 # vLLM: block 级缓存匹配，LRU 驱逐
 python -m simulator.run --backend vllm \
   --num-requests 50 --prompt-length 512 --output-length 256 \
-  --shared-prefix-ratio 0.5 --seed 42 -o report_vllm.json
+  --shared-prefix-ratio 0.5 --random-seed 42 -o report_vllm.json
 
 # SGLang: Radix Tree 匹配（page_size=256 页对齐），可配置驱逐策略
 python -m simulator.run --backend sglang \
   --num-requests 50 --prompt-length 512 --output-length 256 \
-  --shared-prefix-ratio 0.5 --seed 42 -o report_sglang.json
+  --shared-prefix-ratio 0.5 --random-seed 42 -o report_sglang.json
 
 # 对比两个 JSON 文件中的 cache_hit_rate、avg_cache_usage 等字段
 ```
@@ -228,7 +229,7 @@ for ratio in 0.0 0.25 0.5 0.75 1.0; do
   python -m simulator.run --backend vllm --num-requests 100 \
     --prompt-length 512 --output-length 64 \
     --shared-prefix-ratio $ratio --num-spec-tokens 0 \
-    --seed 42 -o "hit_rate_${ratio}.json"
+    --random-seed 42 -o "hit_rate_${ratio}.json"
   # 从输出 JSON 提取 cache_hit_rate
   python3 -c "import json; print(json.load(open('hit_rate_${ratio}.json'))['cache_hit_rate'])"
 done
@@ -240,20 +241,20 @@ done
 # 关闭投机解码（K=0）：每个 decode step 只计算 1 个 token
 python -m simulator.run --backend vllm --num-spec-tokens 0 \
   --num-requests 50 --prompt-length 256 --output-length 128 \
-  --seed 42 -o no_spec.json
+  --random-seed 42 -o no_spec.json
 
 # K=3，高接受率：模拟强投机模型
 #   draft 位置 0 接受率 0.9, 位置 1 接受率 0.8, 位置 2 接受率 0.7
 python -m simulator.run --backend vllm --num-spec-tokens 3 \
   --accept-mode per_position --acceptance-rates 0.9 0.8 0.7 \
   --num-requests 50 --prompt-length 256 --output-length 128 \
-  --seed 42 -o spec_high.json
+  --random-seed 42 -o spec_high.json
 
 # K=3，低接受率：模拟弱投机模型
 python -m simulator.run --backend vllm --num-spec-tokens 3 \
   --accept-mode per_position --acceptance-rates 0.5 0.3 0.1 \
   --num-requests 50 --prompt-length 256 --output-length 128 \
-  --seed 42 -o spec_low.json
+  --random-seed 42 -o spec_low.json
 
 # 对比 avg_accepted_tokens_per_step：高接受率应该显著高于低接受率
 ```
@@ -274,7 +275,7 @@ python -m simulator.run --backend vllm --num-requests 50 \
     [0,     4096, 62.0],
     [1000,  4,    4.2]
   ]' \
-  --seed 42 -o custom_gpu.json
+  --random-seed 42 -o custom_gpu.json
 
 # 也可以只设置系数（覆盖拟合）通过 JSON 配置文件
 ```
@@ -284,12 +285,12 @@ python -m simulator.run --backend vllm --num-requests 50 \
 ```bash
 # 从本地 config.json 读取层数、head 数、MLA 参数等
 python -m simulator.run --backend vllm \
-  --model-config /path/to/Meta-Llama-3-8B/config.json \
-  --num-requests 100 --seed 42 -o llama.json
+  --model-config-path /path/to/Meta-Llama-3-8B/config.json \
+  --num-requests 100 --random-seed 42 -o llama.json
 
-# 省略 --model-config 时自动使用 DeepSeek V4 Flash 默认配置
+# 省略 --model-config-path 时自动使用 DeepSeek V4 Flash 默认配置
 python -m simulator.run --backend vllm \
-  --num-requests 100 --seed 42 -o deepseek_v4_flash.json
+  --num-requests 100 --random-seed 42 -o deepseek_v4_flash.json
 ```
 
 **示例 6：完整 JSON 配置文件**
@@ -374,7 +375,7 @@ python -m simulator.run --config real_trace.json -o real_result.json
 - **测试覆盖**：31 个 unittest 覆盖 acceptance / GPU perf / SGLang allocate / scheduler E2E（`simulator/tests/`，含 `integration/test_scheduler_e2e.py` 跑两后端 spec-on/off 全流程，断言吞吐/逐位置接受率/壁钟时间字段，带 wall-clock timeout 防 hang）。
 - **无 chunked prefill**：每个请求的 prompt 在一步内完成 prefill，不分块。真实引擎会将长 prompt 分成多个 chunk 与 decode 交替执行。
 - **无抢占**：**prefill** 分配失败时直接 `RuntimeError` 终止（不重试、不换出）——因为无 chunked prefill，重试必死循环。真实引擎会 preempt 已运行请求腾空间。**decode** 分配失败时跳过该步（不推进该请求，不抛错）——SWA 滑窗回收让 decode 占用基本稳定，此路径极难触发，但若并发极高且 cache 极小，理论上一致跳过会让请求卡死（真实引擎会 preempt 而非跳过）。OOM 报错信息按后端区分：vLLM 报"跨组 pool block 真实需求"，SGLang 报"哪个池(swa/full)超容+used/need/cap"。
-- **FP4 indexer**：通过 `--fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
+- **FP4 indexer**：通过 `--use-fp4-indexer` CLI 或 config.json `use_fp4_indexer` 开关控制（SGLang fp4→68 B/token, vLLM 永 132）
 - **vLLM packed layout**：DSV4 的 tensor 布局和 block 计数由 vLLM 的 `_get_kv_cache_config_packed` 计算，正确反映共享 block pool。
 - **SGLang SWA ring**：`deepseek_v4_hook.py` 设置 `swa_full_tokens_ratio=0.1`，仿真按此比例计算 SWA 容量（ring buffer 只占满密度的 10%）。
 - **SGLang 三池建模**：容量上限已按 SWA/C4/C128 三池独立校验（_pool_caps/_pool_used），C128 为最小池先满触发驱逐，无跨池借用。底层索引空间共享单一平坦 allocator（RadixCache 要求）。prefix 匹配不受影响，但内存压力模型是近似的——真实 SGLang 各池独立触发 OOM（如 C128 仅 8192 token 即满），sim 单池把三池容量混在一起，C128 用尽时可从 SWA/C4 配额"借"，cache_usage 和驱逐时机会偏离真实。常规负载（<10% 利用率）下影响可忽略，高压场景需注意。

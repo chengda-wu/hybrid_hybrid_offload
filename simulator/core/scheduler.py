@@ -134,7 +134,7 @@ class SimulatorScheduler:
             raise RuntimeError(
                 f"Scheduler stalled: {len(active)} active request(s) made no "
                 f"progress for {self._stall_count} consecutive steps (KV pool "
-                f"full, nothing evictable).  Increase --num-kv-blocks or reduce "
+                f"full, nothing evictable).  Increase --num-kv-cache-blocks or reduce "
                 f"concurrency.  (limit={self._STALL_LIMIT})"
             )
 
@@ -233,7 +233,7 @@ class SimulatorScheduler:
         report which pool(s) are over budget.
         """
         free = self._backend.num_free_blocks
-        hint = "Increase --num-kv-blocks or reduce prompt length."
+        hint = "Increase --num-kv-cache-blocks or reduce prompt length."
 
         # vLLM: shared pool, real demand in pool blocks across all groups.
         required = getattr(self._backend, "last_alloc_required_blocks", None)
