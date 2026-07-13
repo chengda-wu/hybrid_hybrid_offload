@@ -421,6 +421,18 @@ class SGLangBackend(KVBackend):
             [t for t in sim_req._allocated_indices if len(t) > 0]
         ) if sim_req._allocated_indices else torch.tensor([], dtype=torch.int64)
 
+        # Collapse the append-only log into one tensor so the next decode step's
+        # torch.cat is O(1) instead of O(n) over a list that grows by one entry
+        # per decode step.  Without this, long decodes (~1K+ steps) pay an O(n²)
+        # cat cost in sync_state — the only compaction site was free_rejected_slots,
+        # which fires on rejection and rarely at high acceptance rates.  The
+        # values tensor below already clones the prefix we insert, so reusing
+        # flat_indices here as the single cached entry is safe and exact.
+        if len(sim_req._allocated_indices) > 1:
+            sim_req._allocated_indices = (
+                [flat_indices] if len(flat_indices) > 0 else []
+            )
+
         # flat >= key_len always holds: flat == total_tokens and
         # key_len = floor(total_tokens/page_size)*page_size <= total_tokens.
         assert len(flat_indices) >= key_len, (

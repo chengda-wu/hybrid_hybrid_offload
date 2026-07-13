@@ -445,5 +445,40 @@ class TestKvBytesAndRatioDerived(unittest.TestCase):
                 SGLangConfig.from_backend_config(bc(spec=2))
 
 
+@requires_sglang
+class TestAllocatedIndicesCompacted(unittest.TestCase):
+    """Round-10 F3: ``_allocated_indices`` must stay compacted to a single
+    tensor after each ``sync_state`` so per-step ``torch.cat`` is O(1), not
+    O(n) over a list that grows one entry per decode step.
+
+    Pre-fix ``sync_state`` only ever *appended* to ``_allocated_indices``;
+    the sole compaction site was ``free_rejected_slots``, which fires on
+    rejection and rarely at high acceptance rates — so a long decode grew
+    the list to ~n entries, making every step's ``torch.cat`` O(n) (O(n²)
+    total).  Post-fix ``sync_state`` collapses the log to one tensor.
+    """
+
+    def test_indices_collapsed_to_one_after_sync_state(self):
+        backend = _make_backend(num_blocks=8192)
+        prompt = list(range(64))
+        req = backend.create_request("r1", prompt, max_tokens=200)
+        backend.register_request(req)
+        backend.allocate_slots(req, num_new_tokens=64)
+        backend.sync_state(req, prompt)
+
+        # Simulate 20 decode steps (spec off → 1 token/step, no rejections).
+        out = list(prompt)
+        for tok in range(10000, 10000 + 20):
+            backend.set_spec_tokens(req, [])
+            backend.allocate_slots(req, num_new_tokens=1)
+            out.append(tok)
+            backend.sync_state(req, out)
+
+        # The log must be a single tensor, not 21+ entries.
+        self.assertLessEqual(len(req._allocated_indices), 1)
+        # And its length must equal the total allocated token count.
+        self.assertEqual(len(req._allocated_indices[0]), 64 + 20)
+
+
 if __name__ == "__main__":
     unittest.main()

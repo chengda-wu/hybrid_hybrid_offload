@@ -312,7 +312,14 @@ class SimulatorScheduler:
             if self._verbose:
                 print(f"  [{req.request_id}] decode alloc failed, skipping step")
             req.clear_spec_tokens()
-            return loaded, 0, 0, 0
+            # Return loaded=0, not the request's cached-token count: this
+            # request did NOT run a forward pass this step, so the GPU never
+            # read its cached KV.  Counting its loaded tokens would inflate
+            # predict(total_loaded, total_computed) and over-estimate step
+            # latency under memory pressure.  computed=0 already excludes it
+            # from the >0 gate (step_latency only added when total_computed>0),
+            # but total_loaded is summed unconditionally, so it must be 0 here.
+            return 0, 0, 0, 0
 
         req.allocated_blocks = allocated
 
