@@ -92,12 +92,10 @@ class MockTokenToKVPoolAllocator:
 class SGLangBackend(KVBackend):
     """Wraps the real SGLang RadixCache for token-level simulation."""
 
-    def __init__(self, backend_config: KVBackendConfig,
-                 num_spec_tokens: int = 0):
+    def __init__(self, backend_config: KVBackendConfig):
         sglang_cfg = SGLangConfig.from_backend_config(backend_config)
 
         self._backend_config = backend_config
-        self._num_spec_tokens = num_spec_tokens
         self._page_size = sglang_cfg.page_size
         # Base per-position caps from real SGLang's DSV4PoolConfigurator (one
         # full slot / one swa slot per token position).  Stored for diagnostics
@@ -254,6 +252,12 @@ class SGLangBackend(KVBackend):
         # If any pool is over budget, trigger RadixCache eviction.
         # evict() expects token count, not slot count.
         if _over_budget():
+            # evict() frees whole tree nodes → on_free deducts the FULL pool
+            # only (see _deduct_pool_used invariant).  SWA is NOT deducted
+            # here on purpose: evicted nodes' out-of-window SWA was already
+            # reclaimed by _reclaim_swa_out_of_window, and deduplicating that
+            # via on_free would double-count (no tombstones, unlike real
+            # SWARadixCache).
             self._cache.evict(EvictParams(num_tokens=to_alloc))
             # Re-check: eviction may have freed enough
             over = _over_budget()
@@ -493,6 +497,8 @@ class SGLangBackend(KVBackend):
         # mid-request.  If a future change adds multi-segment per-step
         # allocation, the guard above must switch to per-step segment bounds.
         self._mock_allocator.free(flat[-num_rejected:])
+        # on_free deducts the FULL pool only (see _deduct_pool_used invariant);
+        # SWA for these rejected in-window tokens is deducted explicitly below.
         # Remove freed indices from _allocated_indices
         keep_len = len(flat) - num_rejected
         if keep_len > 0:
@@ -541,6 +547,9 @@ class SGLangBackend(KVBackend):
 
         if len(flat) > key_len:
             tail = flat[key_len:]
+            # on_free deducts the FULL pool only (see _deduct_pool_used
+            # invariant); the in-window SWA for this finish is returned
+            # explicitly below.
             self._mock_allocator.free(tail)
         # Return the request's remaining (in-window) SWA slots.  Out-of-window
         # SWA was already returned by _reclaim_swa_out_of_window (tracked by
@@ -628,7 +637,7 @@ class SGLangBackend(KVBackend):
         # Ring sizes — import from SGLang (module-level, no server_args needed).
         # Spec mode doubles ring sizes (pool_configurator.py:514).  Online c128
         # collapses ring_size to 1 (get_compress_state_ring_size, memory_pool.py:34).
-        is_spec = self._num_spec_tokens > 0
+        is_spec = self._backend_config.num_spec_tokens > 0
         from sglang.srt.mem_cache.deepseek_v4_memory_pool import (
             get_compress_state_ring_size,
         )
@@ -714,7 +723,7 @@ class SGLangBackend(KVBackend):
                         # max_speculative_num_draft_tokens (configurator:515-517);
                         # the mock server_args passes None → 0 in the configurator,
                         # so this is 0 unless a draft-token count is configured.
-                        online_mtp = self._num_spec_tokens or 0
+                        online_mtp = self._backend_config.num_spec_tokens or 0
                         state_tokens *= (1 + online_mtp)
                 else:
                     state_tokens = -(-(raw + c128_ring + 1) // 128) * 128
@@ -816,4 +825,10 @@ class SGLangSimRequest:
 
     @property
     def num_tokens(self) -> int:
+        """Total tokens on the sim-side handle, INCLUDING pending spec tokens.
+
+        Mirrors ``vLLMSimRequest.num_tokens``.  Currently unused by the
+        scheduler (which reads ``SimRequestState.num_tokens``); kept for
+        parity and potential diagnostics.
+        """
         return len(self.prompt_token_ids) + len(self.output_token_ids) + len(self.spec_token_ids)

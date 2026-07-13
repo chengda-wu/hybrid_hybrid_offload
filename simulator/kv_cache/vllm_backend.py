@@ -213,6 +213,15 @@ class vLLMSimRequest:
 
     @property
     def num_tokens(self) -> int:
+        """Total tokens on the sim-side handle, INCLUDING pending spec tokens.
+
+        This is the simulator's view of the sequence length and differs from
+        the vllm ``Request.num_computed_tokens`` pushed by ``sync_to_vllm``
+        (which is ``len(prompt) + len(output)`` — spec excluded, since drafts
+        are cleared before syncing).  Currently unused by the scheduler (which
+        reads ``SimRequestState.num_tokens``, the same formula); kept for
+        parity with the SGLang handle and potential diagnostics.
+        """
         return len(self.prompt_token_ids) + len(self.output_token_ids) + len(self.spec_token_ids)
 
     def sync_to_vllm(self) -> None:
