@@ -107,8 +107,6 @@ SWA 与 compressor 组（滑窗）只命中到 `B < A`。全局最小共识（`f
 
 ## staircase 数学可行性核验
 
-早先据 `save_partial_states` 判 staircase 不可行（旧 Blocker 2）。核验 compress kernel 后**推翻**。
-
 ### 证据：compress 是固定窗口聚合
 
 `fused_compress_quant_cache.py` 三个 kernel 对边界 token `position` 的状态聚合窗口**固定大小**
@@ -132,11 +130,8 @@ compressor 状态窗口（≤256）≤ SWA 窗口（128 量级），不拓宽锥
 
 **越浅算越多、越深算越少**，三角成立，省 ~50% hidden-state GEMM（与 §15.3.1 一致）。
 
-### 旧 Blocker 2 为何不成立
-
-旧文混淆了"state cache 跨请求命中到 B"（前缀缓存属性，只意味 `[B,A)` state 本次要写）与"本次
-forward 内全层穿透"（依赖主张，**错**）。本次 forward 内依赖是滑窗的，锥逐层收窄。staircase
-跳过的是锥外 token 的 hidden-state 计算；锥内 token 的 `save_partial_states` 照常写。两者自洽。
+staircase 跳过的是锥外 token 的 hidden-state 计算；锥内 token 的 `save_partial_states` 照常
+写（`[B,A)` state 本次要写，因 state cache 跨请求只命中到 B）。两者自洽。
 
 ---
 
