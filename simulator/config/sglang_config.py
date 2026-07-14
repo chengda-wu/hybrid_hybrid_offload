@@ -59,7 +59,8 @@ class SGLangConfig:
         """
         blocks = bc.num_kv_cache_blocks
         sbs = bc.scheduler_block_size
-        ps = bc.block_size  # system page_size (256 for DSV4 MLA)
+        ps = bc.block_size  # set to main_block_size (256 for DSV4) by engine.py;
+                            # KVBackendConfig.block_size itself defaults to 16
 
         full_tokens = blocks * sbs
 

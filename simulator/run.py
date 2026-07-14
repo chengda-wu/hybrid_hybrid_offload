@@ -140,7 +140,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # KV cache (flag = kebab-case of the JSON field name)
     p.add_argument("--kv-cache-block-size", type=int, default=16,
-                   help="KV cache block size (tokens per block). JSON: kv_cache_block_size.")
+                   help="KV cache block size (tokens per block). Only used for "
+                        "non-hybrid models; hybrid models (DSV4) derive the block "
+                        "size from layer_groups (max group block size, e.g. 256), "
+                        "so this flag is ignored for DSV4. JSON: kv_cache_block_size.")
     p.add_argument("--max-model-len", type=int, default=8192,
                    help="JSON: max_model_len.")
     p.add_argument("--num-kv-cache-blocks", type=int, default=4096,

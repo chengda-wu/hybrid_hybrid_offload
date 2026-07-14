@@ -216,5 +216,58 @@ class TestDatasetFieldDefaultsAligned(unittest.TestCase):
                                  f"{name}: CLI default {cli} != from_json default {from_json}")
 
 
+class TestDeadFieldsAndAbcDefaults(unittest.TestCase):
+    """Pin two cleanups: the dead SimulatorConfig.hash_block_size field is
+    gone (engine.py never read it — it derives hash_block_size from
+    layer_groups for hybrid models, or reuses kv_cache_block_size otherwise),
+    and KVBackend declares num_free_blocks/total_blocks with default
+    implementations so a backend omitting them degrades to a "0 free"
+    diagnostic instead of crashing the OOM error path.
+    """
+
+    def test_hash_block_size_removed_from_simulator_config(self):
+        import dataclasses
+        from simulator.config.simulator_config import SimulatorConfig
+
+        field_names = {f.name for f in dataclasses.fields(SimulatorConfig)}
+        self.assertNotIn("hash_block_size", field_names)
+
+    def test_from_json_ignores_stray_hash_block_size_key(self):
+        # A JSON config that still carries the removed key must not error —
+        # from_json simply drops it (no consumer ever read it).
+        path = _write_json({"hash_block_size": 4})
+        try:
+            cfg = SimulatorConfig.from_json(path)
+            self.assertFalse(hasattr(cfg, "hash_block_size"))
+        finally:
+            Path(path).unlink()
+
+    def test_kvbackend_abc_provides_default_num_free_blocks(self):
+        # A minimal backend that omits num_free_blocks/total_blocks inherits
+        # the ABC default (0) rather than raising AttributeError on the
+        # scheduler's OOM-diagnostic path.
+        from simulator.kv_cache.base import KVBackend
+
+        class _Bare(KVBackend):
+            create_request = register_request = get_computed_blocks = \
+                allocate_slots = set_spec_tokens = sync_state = free = \
+                lambda *a, **k: None
+
+            @property
+            def usage(self):
+                return 0.0
+
+            @property
+            def total_bytes(self):
+                return 0
+
+            @property
+            def name(self):
+                return "bare"
+
+        self.assertEqual(_Bare().num_free_blocks, 0)
+        self.assertEqual(_Bare().total_blocks, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

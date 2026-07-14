@@ -156,6 +156,27 @@ class KVBackend(ABC):
         return None
 
     @property
+    def num_free_blocks(self) -> int:
+        """Free block/token count, for OOM diagnostics only.
+
+        vLLM reports free pool blocks; SGLang reports free token slots.  Not
+        part of the scheduling control flow (only ``usage`` is) — the scheduler
+        reads it solely to build a clearer prefill-OOM message.  Declared here
+        (non-abstract, default 0) rather than left implicit so a third backend
+        that omits it degrades to an unhelpful "0 free" diagnostic instead of
+        crashing the error-reporting path with AttributeError.  Concrete
+        backends override.
+        """
+        return 0
+
+    @property
+    def total_blocks(self) -> int:
+        """Total block/token capacity, for diagnostics only.  See
+        ``num_free_blocks``.  Concrete backends override.
+        """
+        return 0
+
+    @property
     @abstractmethod
     def total_bytes(self) -> int:
         """Total KV cache size in bytes.

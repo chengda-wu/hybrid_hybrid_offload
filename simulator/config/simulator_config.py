@@ -124,7 +124,6 @@ class SimulatorConfig:
 
     # KV cache
     kv_cache_block_size: int = 16
-    hash_block_size: int = 16
     max_model_len: int = 8192
     num_kv_cache_blocks: int = 4096
 
@@ -227,7 +226,6 @@ class SimulatorConfig:
             use_fp4_indexer=data.get("use_fp4_indexer", False),
             swa_full_tokens_ratio=data.get("swa_full_tokens_ratio", 0.1),
             kv_cache_block_size=data.get("kv_cache_block_size", 16),
-            hash_block_size=data.get("hash_block_size", 16),
             max_model_len=data.get("max_model_len", 8192),
             num_kv_cache_blocks=data.get("num_kv_cache_blocks", 4096),
             warmup_steps=data.get("warmup_steps", 10),
