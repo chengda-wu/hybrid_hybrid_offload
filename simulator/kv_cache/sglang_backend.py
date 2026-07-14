@@ -527,7 +527,6 @@ class SGLangBackend(KVBackend):
         (matches real SGLang cache_finished_req, radix_cache.py:483).
         """
         import torch
-        from array import array
         from sglang.srt.mem_cache.radix_cache import RadixKey
 
         # Release lock on prefix node

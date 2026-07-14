@@ -118,6 +118,15 @@ class SGLangConfig:
                 num_spec if online_mtp_path else None
             ),
         )
+        # NOTE: the configurator (DSV4PoolConfigurator) only tests
+        # ``speculative_algorithm is None/is not None`` to set is_speculative —
+        # it never compares the *string value*.  The ``== "EAGLE"`` assertion
+        # lives in deepseek_v4_hook.py, which the simulator bypasses (it builds
+        # DSV4PoolConfigurator directly).  So "MTP" here is a faithful label of
+        # what the simulator models; it is NOT a bug to be "fixed" by changing
+        # it to "EAGLE" (that would mislabel the MTP model as EAGLE).  The
+        # is_eagle() gate on the experimental online path is faked via the
+        # separate ``spec_algorithm`` namespace below, not this string.
         # spec_algorithm is only read when SGLANG_OPT_USE_ONLINE_COMPRESS env is
         # set (default off); is_eagle() is forced True only on the experimental
         # online-c128-MTP path (see above).
