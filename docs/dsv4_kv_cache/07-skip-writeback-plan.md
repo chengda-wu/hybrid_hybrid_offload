@@ -1,13 +1,16 @@
 # 计划：在 vLLM 中实现 DSV4 skip-writeback 与 staircase 重算
 
-> 承接 §10–§16（`06-staircase-delta-feasibility.md`）。两个技术点数学独立、工程分层：
+> 承接 §10–§16（`06-staircase-delta-feasibility.md`）。两个技术点工程分层、有硬依赖：
 >
 > - **Feature 1 skip-writeback**：闸掉 `[B,A)` 冗余的 G0 写回。小改动、默认关、逐位一致，**先行**。
 > - **Feature 2 staircase**：把 delta 段重算从全矩形 `D×L` 改成逐层递减三角形，省 ~50%
->   hidden-state GEMM。**数学可行**（compress 是固定窗口聚合，见
->   [核验](#staircase-数学可行性核验)），主要工程障碍在 MegaMoE 残差融合 kernel，**第二阶段**。
+>   hidden-state GEMM。**硬依赖 Feature 1**：不 skip-writeback 时 main MLA 全序列读路径使 delta
+>   hidden state 全层穿透、三角形退化为矩形；skip-writeback 消除该路径后依赖锥 W_eff 成立
+>   （见 [可行性与前置条件](#staircase-可行性与前置条件)）。主要工程障碍在 MegaMoE 残差融合
+>   kernel，**第二阶段**。
 >
-> Feature 2 复用 Feature 1 建立的 per-request A 透传。
+> Feature 2 复用 Feature 1 的 per-request A 透传，且 `enable_staircase` 隐含
+> `enable_skip_writeback`。
 
 ## 背景
 
@@ -18,8 +21,10 @@ SWA 与 compressor 组（滑窗）只命中到 `B < A`。全局最小共识（`f
 
 关键事实（均已核验，附行号）：
 
-- `A`、`B` 均 **block 对齐**（G0 block_size=256）。`find_longest_cache_hit` 对 Full attention
-  做 `curr_hit_length // block_size * block_size`（`kv_cache_coordinator.py:687-689`），返回
+- `A`、`B` 均 **block 对齐**（G0 block_size=256）。G0 的 spec 是 `MLAAttentionSpec`
+  （`attention.py:610`），它是 `FullAttentionSpec` 的**子类**（`kv_cache_interface.py:363`），
+  故 `find_longest_cache_hit` 的 Full attention 路径对 G0 适用：block 对齐 trim
+  （`kv_cache_coordinator.py:687-689`）、downward-closed（L683-690）、排第一（L592-593）。返回
   `hit_length = B`；迭代中的 `longest_hit_length = A`（L719、L737）**未返回**，需暴露。
 - compressor `forward`（`compressor.py:274-399`）对 delta token 无条件跑两 kernel：
   `save_partial_states`（L318，写 state cache，滑窗，`[B,A)` 确实缺失**必跑**）+
@@ -37,11 +42,18 @@ SWA 与 compressor 组（滑窗）只命中到 `B < A`。全局最小共识（`f
 引入独立 gate 张量 `compress_gate_slot_mapping`（不改 kernel、不改 attention）：
 
 - = 未压缩 slot 副本，把每个 `position < A` 的 token 置 `-1`。
-- 作为 `compress_norm_rope_store` 的 `slot_mapping` 传入（`compressor.py:380`）。
+- 作为 `compress_norm_rope_store` 的第一参数 `slot_mapping` 传入（`compressor.py:380`）。
 - `save_partial_states`（`compressor.py:324`）仍用原 slot，**不变**。
 
-结果：`compress_norm_rope_store` 对 `[B,A)` token 早退；`save_partial_states` 照跑；attention
-及其 compressed slot 不动。
+`compress_norm_rope_store` 的第一参数 `slot_mapping_ptr` **只**用于 `slot_id<0` 早退（核验：
+`fused_compress_quant_cache.py` sparse_attn kernel 内 `slot_mapping_ptr` 仅出现于 L46-47 早退；
+state gather 走 `block_table` L174-179；G0 store 走**独立第二门** `kv_slot_mapping_ptr`
+L108-112 = `k_cache_metadata.slot_mapping`）。故 gate 在第一门早退会**跳过整条
+`compress_norm_rope_store` 流水**（compress 聚合 + RMSNorm + RoPE + 量化 + G0 store），不只是
+G0 写——多省了 compress 聚合 GEMM。
+
+结果：`compress_norm_rope_store` 对 `[B,A)` token 整条早退；`save_partial_states` 照跑（独立
+kernel，吃原 slot）；attention 及其 compressed slot 不动。
 
 > PAD 所有 `pos<A` 而非仅边界：kernel 本就对非边界早退（`fused_compress_quant_cache.py:163`），
 > PAD 非边界是 no-op，但省去重算 `compress_ratio`。真正受影响的只有 `[B,A)` 边界 token。
@@ -60,9 +72,11 @@ SWA 与 compressor 组（滑窗）只命中到 `B < A`。全局最小共识（`f
 `self.num_uncached_common_prefix_tokens`（L737 = A−B）反推 A = B + 该值。前者更直白，取前者。
 
 **S3 挂到 Request** — `vllm/v1/core/kv_cache_manager.py::get_computed_blocks`（L202-242）：
-捕获 A，flag 开启时设 `request.g0_hit_length = A`。**A 在 request 生命周期内固定**：首次调度
-时 `get_computed_blocks` 设定，后续 chunk / running 步不再变（G0 是全序列缓存，命中长度不随
-请求推进改变）。scheduler.py 无逻辑改动（DSV4 走常规路径，scheduler.py:712）。
+捕获 A，flag 开启时设 `request.g0_hit_length = A`。**A 在 request 生命周期内固定**：`get_computed_blocks`
+只在 `request.num_computed_tokens == 0` 时调用一次（`scheduler.py:676` 守卫、L714 调用），running
+请求与后续 prefill chunk 都不重算。首 chunk 调用时 `max_cache_hit_length = request.num_tokens - 1`
+（全 prompt 长度，`kv_cache_manager.py:227`），故一次即得全 prompt 的 G0 命中 A，跨 chunk 不变。
+scheduler.py 无逻辑改动（DSV4 走常规路径，scheduler.py:712）。
 
 **S4 per-request A 上 GPU** —
 - `vllm/v1/worker/input_batch.py`：加 `g0_cached_prefix_len_cpu` 数组（仿
@@ -105,33 +119,52 @@ SWA 与 compressor 组（滑窗）只命中到 `B < A`。全局最小共识（`f
 
 ---
 
-## staircase 数学可行性核验
+## staircase 可行性与前置条件
 
-### 证据：compress 是固定窗口聚合
+### 前置条件：skip-writeback 消除 main MLA 全序列读路径
 
-`fused_compress_quant_cache.py` 三个 kernel 对边界 token `position` 的状态聚合窗口**固定大小**
-（L169-172，三 kernel 一致）：
+staircase 的三角形成立**依赖 Feature 1 已生效**。原因在 main MLA 这条读路径（核验
+`flashmla.py:237-304`）：
 
-```python
-start = position - (1 + OVERLAP) * COMPRESS_RATIO + 1
-tokens = tl.arange(0, (1 + OVERLAP) * COMPRESS_RATIO)   # 固定窗口宽
-```
+- 单层 `DeepseekV4DecoderLayer.forward`（`model.py:909`）内，先跑 compressor
+  `compress_norm_rope_store` **用本层 delta hidden state 写回 `[B,A)` 的 G0 压缩条目**，紧接着
+  main MLA attention `dequantize_and_gather_k_cache`（`flashmla.py:296-304`）按
+  `seq_lens // compress_ratio`（L299，seq_len=A）gather G0 中 `[0, A/cr)` **全部压缩条目，含
+  本步刚写回的 `[B,A)` 条目**。
+- 故层 l+1 的 main MLA attention 读层 l compressor 写回的 delta G0 → 层 l+1 依赖层 l 的 delta
+  hidden state → **每个 delta token 每层都要算，全层穿透，三角形退化为矩形**（与 §11.3 第一条
+  读路径一致，该条明确标注"前提：skip 写回"）。
 
-C4 窗口 ≈8，C128 ≈256（与 SWA 128 同量级）。`save_partial_states`（`save_partial_states.py:68-90`）
-one program per token，只写自己那格，零跨 token 读。
+**skip-writeback 生效后**：compressor 不重写 `[B,A)` G0，更深层 main MLA 读**旧缓存**（前缀缓存
+命中到 A 的条目）→ 不依赖本步 delta hidden state → 该全序列读路径消失。这正是不 skip-writeback
+时 staircase 不成立、skip 后才成立的根因。
+
+### 剩余读路径均为滑窗 → 依赖锥 W_eff 成立
+
+skip-writeback 后，delta token `p` 的 hidden state 只剩两条读路径（核验 `sparse_swa.py:228-230`、
+`fused_compress_quant_cache.py:169-172`）：
+
+| 读路径 | 窗口 | 依据 |
+|---|---|---|
+| SWA attention（同层/更深层） | 128 | `window_size = config.sliding_window = 128`（`attention.py:179`），gather_lens `= D + min(B, W-1)`（`sparse_swa.py:228-230`） |
+| compressor state 聚合 | C4=8、C128=128 | `start = position - (1+OVERLAP)·cr + 1`（`fused_compress_quant_cache.py:169`），`overlap = cr==4`（`compressor.py:216`） |
+
+两路径最大窗口 W=128。`save_partial_states`（`save_partial_states.py:68-90`）one program per
+token，只写自己那格，零跨 token 读，不制造额外依赖。
 
 ### 依赖推导
 
-compressor 状态窗口（≤256）≤ SWA 窗口（128 量级），不拓宽锥。锥由最宽窗口 W=128 决定。自顶向
-下（顶层 L=42，底层 L=0），层 L 需要的 token 下界 `p >= A - W·(L_top - L + 1)`：
+锥由最宽窗口 W=128 决定。令 R_l 为"为在顶层（L=42，output 端）产出末尾 W 个 delta token 的正确
+hidden state，第 l 层必须计算的位置集合"，递推 `R_{l-1} = ∪_{t∈R_l} {t-W+1,…,t}`
+（与 §11.4 / `swa-kv-offloading-analysis.md` §3 一致）。层 l（input 端 l=0，output 端 l=42）的
+token 下界 `p >= A - W·(42 - l + 1)`：
 
-- 底层 L=0：`[max(B, A-W_eff), A)`，宽 ≈ W_eff = 128+42·127 ≈ 5462。
-- 顶层 L=42：`[A-128, A)`，宽 128。
+- input 端 l=0：`[max(B, A-W_eff), A)`，宽 ≈ W_eff = 128+42·127 = 5462。
+- output 端 l=42：`[A-128, A)`，宽 128。
 
-**越浅算越多、越深算越少**，三角成立，省 ~50% hidden-state GEMM（与 §15.3.1 一致）。
-
-staircase 跳过的是锥外 token 的 hidden-state 计算；锥内 token 的 `save_partial_states` 照常
-写（`[B,A)` state 本次要写，因 state cache 跨请求只命中到 B）。两者自洽。
+**input 端算最多（W_eff）、output 端算最少（128）**，三角成立，省 ~50% hidden-state GEMM
+（D≥W_eff 时，与 §15.3.1 一致）。staircase 跳过锥外 token 的 hidden-state 计算；锥内 token 的
+`save_partial_states` 照常写（`[B,A)` state 本次要写，因 state cache 跨请求只命中到 B）。两者自洽。
 
 ---
 
@@ -139,8 +172,9 @@ staircase 跳过的是锥外 token 的 hidden-state 计算；锥内 token 的 `s
 
 ### 目标
 
-delta `[B,A)` 重算从全矩形 `D×L` 改成逐层递减三角形：底层算 ~W_eff token，顶层算 ~128，省
-~50% hidden-state GEMM。
+delta `[B,A)` 重算从全矩形 `D×L` 改成逐层递减三角形：input 端（layer 0）算 ~W_eff token，
+output 端（layer 42）算 ~128，省 ~50% hidden-state GEMM（D≥W_eff 时）。**仅在
+`enable_skip_writeback` 开启时生效**（见前置条件）。
 
 ### 机制：逐层物理收窄 token 集
 
@@ -189,7 +223,9 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
 设计阶段需先做可行性 spike。
 
 **T5 配置 flag** — `vllm/config/cache.py` 加 `enable_staircase: bool = False`，gate 在
-`DeepseekV4Model.forward`。仅 `enable_skip_writeback` 也开时生效。默认关 → 全矩形 → 逐位一致。
+`DeepseekV4Model.forward`。**硬依赖 Feature 1**：`enable_staircase=True` 隐含强制
+`enable_skip_writeback=True`（否则 main MLA 全序列读路径使三角形退化为矩形，见前置条件）。flag
+检查里若 skip-writeback 未开则报错或自动连带开启。默认关 → 全矩形 → 逐位一致。
 
 ### 工程约束
 
@@ -200,8 +236,13 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
 2. **多请求混批**：边界 per-request，收窄后 token 集合需在 batch 维重拼 `query_start_loc`
   （批内 D 不同 → 总 token 数动态）。eager prefill 下可接受。
 3. **C4 窗口(8)被 W=128 拉平**：统一用 W=128 定锥，C4 本可更窄但被拉平，省量略低于上界。
-4. **chunked prefill**：DSV4 当前 no chunked prefill（仓库 CLAUDE.md）。先限定 delta 在单次
-   prefill 内。
+4. **chunked prefill（真实 vLLM 默认开）**：`enable_chunked_prefill=True`（`scheduler.py:84`），
+   DSV4 不禁用。仓库 CLAUDE.md 的"no chunked prefill"指 **simulator**，不是真实引擎。故 delta
+   `[B,A)` **可能跨多个 prefill chunk**，staircase 三角边界须按 chunk 起止切分，不能假设
+   "delta 在单次 prefill 内"。注：A 仍只在首 chunk（`num_computed_tokens==0`）算一次（
+   `get_computed_blocks` 用全 prompt 长度 `request.num_tokens-1`，首 chunk 即得全 prompt 的 A），
+   跨 chunk 不变；但每 chunk 内可参与三角的 token 范围 = 该 chunk 与 `[B,A)` 的交集，三角边界
+   需按 chunk 逐段定。这是 staircase 的实质复杂度，设计阶段需明确 chunk 化三角语义。
 
 ### 待改文件（Feature 2）
 
@@ -218,6 +259,8 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
 - **一致性（主门槛）**：flag 关走全矩形（与主线逐位一致）。flag 开用**底层对齐**验证：对请求 r，
   层 L 锥内 token 的 hidden state 不依赖层 L 锥外 token（依赖只向 `pos` 更小方向），故三角路径
   锥内 token 输出应与全矩形路径逐位一致。逐层断言锥内 token hidden state 一致。
+  **前提**：比较基线两边都须 `enable_skip_writeback=True`（staircase 硬依赖它），仅
+  `enable_staircase` 开/关对比。
 - **单测**：`D>W_eff` 小模型；断言每层进入 forward 的 token 数 = 期望三角宽度，锥内输出与全矩形
   一致。
 - **省量**：Nsight 数各层 GEMM FLOPs/kernel 时间，总 ≈ 全矩形 ~50%。D=5500 测 delta 步 GPU 时间。
@@ -234,5 +277,7 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
 ## 阶段划分
 
 1. **阶段一**：Feature 1（skip-writeback），S1-S5，独立可落地，先合入。建立 A 透传基础设施。
-2. **阶段二**：Feature 2（staircase）。**先做 T4 可行性 spike**（mhc 残差子集/scatter），spike
-   通过再推进 T1-T5。先单请求、eager prefill、`FULL_DECODE_ONLY` 下验证，再扩多请求混批。
+   此阶段本身即有收益（省 `[B,A)` 边界 token 的 compress 聚合 + G0 写），且是阶段二的硬前置。
+2. **阶段二**：Feature 2（staircase），**硬依赖阶段一**（`enable_staircase` 强制
+   `enable_skip_writeback`）。**先做 T4 可行性 spike**（mhc 残差子集/scatter），spike 通过再推进
+   T1-T5。先单请求、eager prefill、`FULL_DECODE_ONLY` 下验证，再扩多请求混批。
