@@ -546,6 +546,24 @@ hc 全局参数）。但 T3 详细设计暴露了 T4 的**真实难点不在 ker
   （行宽 88，Google 风格 docstring）。
 - `.venv/bin/python -m pytest <test_file> -v`（绝不用系统 python3）。
 
+### 硬件验证约束（承重，已核验）
+
+T3/T4 的"锥内逐位一致"验证需要跑真实 DSV4 forward，但 DSV4 的 attention/MoE kernel 有硬架构要求：
+
+- **FlashMLA sparse**（DSV4 主 MLA + SWA decode 路径都走它）要求 `capability.major ∈ [9, 10]`
+  （`vllm/v1/attention/backends/mla/flashmla.py:83`）。
+- **MegaMoE** 要求 SM100（`vllm/models/deepseek_v4/nvidia/model.py:303-304`）。
+
+当前开发机是 **NVIDIA T1200 Laptop GPU（SM7.5）** → **无法跑通任何 DSV4 attention 路径**，B 阶段
+（最小 forward 基线）在本机不可行。editable 安装已就绪（`.venv` 直指 `3rdparty/vllm` 源码树），但
+forward 验证须在 **SM90+（H100）或 SM100（B200）** 上进行。本机能做的仅限：import 冒烟、字段/类型
+检查、纯 CPU 逻辑（如锥边界 `lo_L` 计算、`staircase_ab` 构造）。
+
+** implication for T3/T4**：收窄逻辑的代码可本机编写 + 静态检查，但"锥内逐位一致"必须留到目标
+GPU 机器验证。建议：(1) 本机把 T3/T4 写到"能 import、flag-off 无 no-op 回归"的程度；(2) 写一个
+参数化小 DSV4 forward 测试（本地 `DeepseekV4Config` + 随机权重，`@pytest.skipif(not sm90+)`），
+在目标机跑锥内一致性。
+
 ## 阶段划分
 
 1. **阶段一**：Feature 1（skip-writeback），S1-S5，独立可落地，先合入。建立 A 透传基础设施。
