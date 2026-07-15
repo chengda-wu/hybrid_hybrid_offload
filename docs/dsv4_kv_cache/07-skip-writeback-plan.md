@@ -412,36 +412,53 @@ a, b = (fc.staircase_ab[0].tolist() if fc.staircase_ab is not None else (None, N
 W = self.staircase_window
 L_top = self.num_layers_total - 1
 end = b + num_scheduled_tokens  # 锥右边界（见"锥右边界"决策）
+cur_lo = b  # 当前 hidden_states 左边界（绝对位置）；每层后更新为该层 lo
 saved = {}  # 层前保存原 metadata 引用，层后还原
 
 for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
     l = self.start_layer + i  # 全局层号
     if stair_md is not None:
         lo = max(b, end - W * (L_top - l + 1))
-        row_lo, row_hi = lo - b, end - b
-        # 收窄 hidden_states/positions（连续切片，尾部对齐 end）
-        hs_narrow = hidden_states[row_lo:row_hi]
-        pos_narrow = positions[row_lo:row_hi]
+        rel = lo - cur_lo              # 本层锥相对当前 hidden_states 左端的偏移（≥0）
+        # hidden_states 当前覆盖 [cur_lo, end)；本层锥 [lo, end) 是其尾部切片（lo ≥ cur_lo）
+        hs_narrow = hidden_states[rel:]
+        # positions/input_ids 保持全宽 [b, end)，按绝对位置切
+        pos_narrow = positions[lo - b : end - b]
+        ids_narrow = input_ids[lo - b : end - b] if input_ids is not None else None
+        # 残差 per-token，覆盖 [cur_lo, end)；本层要 [lo, end) 后缀。首层 residual=None 走 mhc_pre
+        if residual is not None: residual = residual[rel:]
+        if post_mix is not None: post_mix = post_mix[rel:]
+        if res_mix is not None: res_mix = res_mix[rel:]
         # 替换该层所有 prefix 的 metadata（attn/swa/compressor/indexer/k_cache）
-        for prefix in layer.all_prefixes:  # 层拥有的全部 forward_context key
+        for prefix in layer.staircase_prefixes:  # 层拥有的全部 forward_context key
             if prefix in stair_md:
                 saved[prefix] = fc.attn_metadata[prefix]      # 保存原引用
                 fc.attn_metadata[prefix] = stair_md[prefix]   # 注入收窄版
         hidden_states, residual, post_mix, res_mix = layer(
-            hs_narrow, pos_narrow, input_ids[row_lo:row_hi] if input_ids is not None else None,
-            post_mix, res_mix, residual,
+            hs_narrow, pos_narrow, ids_narrow, post_mix, res_mix, residual,
         )
-        # 还原（避免泄漏到下一层——下一层有自己收窄版，但 input_ids 等共享张量要还原引用）
+        # 还原（避免泄漏到下一层——下一层有自己收窄版）
         for prefix in saved:
             fc.attn_metadata[prefix] = saved[prefix]
         saved.clear()
-        # residual/post_mix/res_mix 是 [lo_l, end) 子集长度；下一层（更宽、lo 更小）取本层残差
-        # 的尾部后缀切片对齐——见下"残差跨层对齐（后缀切片）"。
+        cur_lo = lo  # 输出收缩到 [lo, end)
     else:
         hidden_states, residual, post_mix, res_mix = layer(
             hidden_states, positions, input_ids, post_mix, res_mix, residual,
         )
 ```
+
+> **层顺序与切片方向（承重，2026-07 修正）**：层循环 input→output（层 0 最宽 → 层 L_top 最窄），
+> 与 `islice(self.layers, start, end)` 的自然顺序一致。每层锥 `[lo_l, end)` 是上一层锥
+> `[lo_{l-1}, end)` 的**后缀**（`lo_l ≥ lo_{l-1}`，向 output 端左边界右移）。故：
+> - `hidden_states` 每层**收缩**到本层锥宽，下一层取其**尾部切片** `hidden_states[rel:]`（`rel =
+>   lo_l - cur_lo ≥ 0`），**不是**按绝对行号 `hidden_states[lo-b:end-b]`（那会切错，因 hidden_states
+>   已不是全宽）。`cur_lo` 跟踪当前左边界。
+> - `positions`/`input_ids` 保持全宽，按绝对位置切（它们不被层改写）。
+> - `residual`/`post_mix`/`res_mix` 同 `hidden_states`，按 `rel` 尾部切片。
+>
+> 旧 plan 伪代码用绝对行号切片 `hidden_states[row_lo:row_hi]` 是**错的**——层输出收缩后绝对行号失效。
+> 已修正为相对 `cur_lo` 的尾部切片（见 model.py 实现与 `test_dsv4_staircase_cone.py`）。
 
 **残差跨层对齐（后缀切片，承重）**：锥方向已修正为 **input 端最宽、output 端最窄，所有锥同右边界
 `end`、左边界随层右移**。故每层锥是上一层锥的**后缀**（尾部对齐 `end`，左端逐层右移）：
@@ -453,9 +470,9 @@ for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer))
 层 42 (output端):                [lo_42 = end-128 ===> end)
 ```
 
-每层 `residual`/`post_mix`/`res_mix` 长度 = 该层锥宽。下一层（`lo_{l+1} < lo_l`，更宽）要的残差 =
-本层残差**砍掉左端 `(lo_l - lo_{l+1})` 个**的尾部后缀。即跨层传递只需一个 slice，**无需全宽缓冲、
-无需 scatter**。
+每层 `residual`/`post_mix`/`res_mix` 长度 = 该层锥宽。下一层（`lo_{l+1} > lo_l`，更窄）要的残差 =
+本层残差**砍掉左端 `(lo_{l+1} - lo_l)` 个**的尾部后缀（即 `residual[rel:]`，`rel = lo_{l+1} - lo_l`）。
+跨层传递只需一个 slice，**无需全宽缓冲、无需 scatter**。
 
 > 旧 plan 的"全宽残差缓冲 + 每层 scatter 写回 (β)" 是基于**错误的锥方向**（层向 output 变宽，下一层
 > 更宽需左端补新 token）。方向修正后下一层更窄，纯后缀切片即可。**(α)/(β) 全宽缓冲方案作废。**
