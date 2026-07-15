@@ -638,3 +638,51 @@ APC 计算，不是 staircase_ab。
    测试已写（`test_dsv4_staircase_e2e.py`，`@skipif(not SM90+)`，本机 skip、目标 GPU 机跑，见"锥内一致性
    验证"）。**剩余仅 GPU 验证**：在 SM90+/SM100 目标机跑 E2E 测试，确认 flag 开/关锥内 token 逐位一致
    （先单请求、eager prefill；多请求混批需 gather+cat+contiguous，future work）。
+
+## 当前状态与遗留问题（2026-07-15）
+
+### 已完成
+
+**Feature 1（skip-writeback）**：S1-S5 全部落地。
+- `compress_gate_slot_mapping` 独立 gate 张量（`position < A` 置 -1），`compress_norm_rope_store` 早退，
+  `save_partial_states` 不变。默认关 → 逐位一致。
+- per-request A 透传：`request.g0_hit_length` → `input_batch.g0_cached_prefix_len_cpu` →
+  `CommonAttentionMetadata.g0_cached_prefix_len` → compressor builder。
+- CPU 单测：`test_dsv4_skip_writeback_gate.py`（builder gate 构造 + mock-kernel dispatch，6 测试）。
+
+**Feature 2（staircase）**：T2-T5 全部落地。
+- T5a flag：`enable_staircase`（`cache.py`），强制 `enable_skip_writeback`。
+- T2：runner `staircase_ab = [[A,B]]`（单请求 prefill + A>B 时）。
+- T3a：model 层循环相对尾切片 narrowing + `_swap/_restore_layer_metadata`（commit `903e87944`）。
+- T3b：`staircase.py` 四个 narrow helper（切片真实 build 输出，无逐层 rebuild / 无 triton）+ model lazy
+  收窄接入（commit `fe040f6a2`）。
+- T4：残差跨层后缀切片，代码落在 T3a（无独立代码）。
+- CPU 单测：`test_dsv4_staircase_cone.py`（8 测试，cone 边界 + 层循环 narrowing + 残差 hand-off）、
+  `test_dsv4_staircase_narrow.py`（14 测试，narrow 切片等价 + 闭式标量 + fail-closed）。
+- E2E 测试：`test_dsv4_staircase_e2e.py`（`@skipif(not SM90+)`，本机 skip）。
+
+### 遗留问题
+
+1. **【阻塞，本机不可解】E2E 锥内一致性未实跑**：开发机 SM7.5 跑不了 DSV4 forward。需在 SM90+（H100）
+   或 SM100（B200）目标机跑 `test_dsv4_staircase_e2e.py`，确认 flag 开/关锥内 token 逐位一致。测试脚手架
+   已写但 forward 路径未实跑，目标机可能需调 1-3 轮（已知风险见"锥内一致性验证"节：coordinator 访问
+   路径、block 对齐、random-weight 稳定性、logprobs 间接性）。
+2. **【设计限制，非 bug】单请求 prefill only**：staircase 只在 `num_reqs==1 and prefill and A>B` 激活。
+   多请求下锥是 per-request、token 轴按请求连续排布，尾切片无对应物——这是正确性前提，narrow helper
+   内 `assert` 单请求 fail-closed。多请求 staircase 是另一量级改动，需先解 compressor state-cache 跨层
+   缓存前置，future work。
+3. **【设计限制】eager prefill only / 无 CUDA graph**：锥宽逐层变化（非静态形状），不能 cudagraph
+   capture。staircase 激活时强制 eager。
+4. **【设计限制】无 chunked prefill**：单请求 spike 假设整段 delta 在一次 prefill 内（`end >= A`）。
+   chunked prefill 切分语义未处理，spike 阶段禁用。
+5. **【待观测】收益未实测**：~50% hidden-state GEMM 节省是设计估算，未在目标机 Nsight/trace 实测。
+   skip-writeback 的 `[B,A)` 边界 token compress 聚合 + G0 写节省同样未实测。
+6. **【代码质量】model.py 有 pre-existing I001 ruff import-sort**（非本工作引入，surgical-changes 不动）。
+
+### 下一步（按优先级）
+
+1. 拿到 SM90+/SM100 目标机，跑 `test_dsv4_staircase_e2e.py`，按已知风险调通，确认锥内逐位一致。
+2. 目标机实测收益（Nsight/Chrome trace：`compress_norm_rope_store` launch 数、delta 步 GPU 时间
+   flag 开/关对比）。
+3. （可选，future work）多请求混批 staircase：先做 compressor state-cache 跨层前缀缓存前置，再设计
+   per-request 锥的 gather+cat+contiguous 收窄。
