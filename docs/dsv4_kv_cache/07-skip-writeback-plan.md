@@ -194,10 +194,18 @@ token 读，不制造额外依赖；其 liveness 由 compress 读者决定（见
 锥由最宽窗口 W=128 决定。令 R_l 为"为在顶层（L=42，output 端）产出末尾 W 个 delta token 的正确
 hidden state，第 l 层必须计算的位置集合"，递推 `R_{l-1} = ∪_{t∈R_l} {t-W+1,…,t}`
 （与 §11.4 / `swa-kv-offloading-analysis.md` §3 一致）。层 l（input 端 l=0，output 端 l=42）的
-token 下界 `p >= A - W·(42 - l + 1)`：
+token 下界 `p >= end - W·(42 - l + 1)`：
 
-- input 端 l=0：`[max(B, A-W_eff), A)`，宽 ≈ W_eff = 128+42·127 = 5462。
-- output 端 l=42：`[A-128, A)`，宽 128。
+- input 端 l=0：`[max(B, end-W_eff), end)`，宽 ≈ W_eff = 128+42·127 = 5462。
+- output 端 l=42：`[end-128, end)`，宽 128。
+
+> **锥右边界 = `end`（设计决策，2026-07）**：锥覆盖本步调度的全部 token
+> `[B, end)`（`end = B + num_scheduled`），即 delta `[B, A)` **与**新 token `[A, end)` 一起并入
+> 锥。理由：SWA 跨层依赖对所有 token 均匀（新 token `p@L` 同样只依赖 `[p-128,p]@L-1`），故新 token
+> 也服从锥，无需单独全量算。这比原 plan 的"锥仅 `[lo_l, A)` + 新 token 全宽"形态简单——单一残差流、
+> 单一 token 集，无需两套 token 拼接残差。**注**：delta 的写回语义（skip-writeback gate、
+> `save_partial_states`）按 token 位置判定，锥内 delta token 与锥内新 token 各自走原写回逻辑，锥右边界
+> 扩到 `end` 不改变写回判定。
 
 **input 端算最多（W_eff）、output 端算最少（128）**，三角成立，省 ~50% hidden-state GEMM
 （D≥W_eff 时，与 §15.3.1 一致）。staircase 跳过锥外 token 的 hidden-state 计算；锥内 token 的
@@ -238,11 +246,13 @@ KV 写（`attention.py:550/569/583`）并把该 token gather 输出置 0（`spar
 对真实 token 是破坏，且不省 GEMM（Q norm/RoPE/attn/MLP 按稠密张量整张跑）。`-1` 只对 padding
 token 安全。
 
-收窄策略（请求 r）：output 端（顶层）最窄 `[A-W, A)`，input 端（底层）最宽
-`[max(B, A-W_eff), A)`。距顶层 k 层只算 `[max(B, A-W·(k+1)), A)`。每层 token 集合是**更靠 output
-层的超集**（向 pos 更小方向逐层扩张），故层间传递时下层（更靠 input）覆盖上层全部 token、并向
-左扩张——hidden state 层间传递连续（上层算过的 token 在下层继续算，下层多算的左侧 token 为上层
-提供窗口上下文）。底层 = 全 `[B,A)`，与既有全矩形在底层对齐。
+收窄策略（请求 r）：output 端（顶层）最窄 `[end-W, end)`，input 端（底层）最宽
+`[max(B, end-W_eff), end)`（`end = B + num_scheduled`，见"锥右边界"决策）。距顶层 k 层只算
+`[max(B, end-W·(k+1)), end)`。锥方向：input 端最宽、output 端最窄，所有锥同右边界 `end`、左边界
+随层右移——故每层 token 集合是**更靠 output 层的后缀**（更靠 input 层是其超集，向 pos 更小方向
+逐层扩张）。层间传递时更靠 input 层覆盖更靠 output 层的全部 token 并向左扩张——hidden state 层间
+传递连续（更靠 output 层算过的 token 在更靠 input 层继续算，多算的左侧 token 为其提供窗口上下文）。
+底层（input 端）= 最宽锥，与既有全矩形在底层对齐。
 
 ### MegaMoE 残差融合 kernel：已验证可吃子集（原 T4 风险点，已降级）
 
@@ -274,7 +284,7 @@ token 安全。
 - **连续性（最硬约束）**：三 launcher 都做 `residual.view(-1, hc_mult, hidden_size)`
   （`tilelang.py:162/402`）与 `x.view(num_tokens, hidden_size)`（L404）。boolean-mask gather
   产出**非连续**张量，`.view()` 会 raise。**连续切片 `x[:k]` 安全**；mask 子集须先
-  `.contiguous()`。staircase 子集是 `[lo_L, A)`（尾部对齐 A）：
+  `.contiguous()`。staircase 子集是 `[lo_L, end)`（尾部对齐 `end`）：
   - **单请求**：是 token 段内尾部连续切片 → `x[offset:]` 连续 ✓。
   - **多请求混批**：各请求尾部子段在 batch 维拼接，需按请求 gather + `cat` + `.contiguous()`
     （非连续，必须拷贝）。这是多请求混批的实质开销。
@@ -304,7 +314,8 @@ token 安全。
 `request.g0_hit_length` → `CommonAttentionMetadata.g0_cached_prefix_len` 通道，直接复用。
 
 **T2 三角边界计算** — runner 侧（`gpu_model_runner.py` prefill eager 路径）按请求算每层 token
-下界 `lo_L = max(B, A - W·(L_top-L+1))`，产出 per-request per-layer 的 `[lo_L, A)` 区间。W=128。
+下界 `lo_L = max(B, end - W·(L_top-L+1))`（`end = B + num_scheduled`），产出 per-request per-layer
+的 `[lo_L, end)` 区间。W=128。
 
 **T3 层循环按层收窄** — `DeepseekV4Model.forward`（`model.py:1077-1085`）层循环内：依据当前层
 `lo_L` 切片 `hidden_states`/`positions`，构造收窄的 `slot_mapping`/`block_table`/
@@ -334,14 +345,14 @@ token 安全。
 故选 **方案 2：runner 预建 per-layer 收窄 metadata，model 层循环只读取替换**。
 
 **单请求语义澄清（承重）**：prefill 时 `num_computed_tokens=B`，本步调度的 token 覆盖位置
-`[B, B+num_scheduled)`。锥是 `[lo_L, A)`。**但本步实际算的 token = 调度 token ∩ 锥 =
-`[max(B, lo_L), min(A, B+num_scheduled))`**。单请求 spike 假设 **整段 delta 在一次 prefill 内**
-（即 `B+num_scheduled >= A`，无 chunked prefill 切分——见工程约束 4 的 chunk 化语义，spike 阶段先
-禁用 chunked prefill 或保证单 chunk）。在此假设下，本步锥内 token = `[max(B, lo_L), A)`。
+`[B, end)`（`end = B + num_scheduled`）。锥是 `[lo_L, end)`（右边界 = `end`，见"锥右边界"决策）。
+本步实际算的 token = 调度 token ∩ 锥 = `[max(B, lo_L), end)`。单请求 spike 假设 **整段 delta 在一次
+prefill 内**（即 `end >= A`，无 chunked prefill 切分——见工程约束 4 的 chunk 化语义，spike 阶段先
+禁用 chunked prefill 或保证单 chunk）。
 
 > 位置 vs token 索引：prefill 调度的 token 在 hidden_states 里是**连续**的，位置从 B 起递增。
-> 位置 `p` 对应 hidden_states 行 `p - B`。锥 `[lo, A)` → 行切片 `[lo - B, A - B)`，**连续尾部对齐
-> A**（mhc `.view()` 要求连续，单请求天然满足）。
+> 位置 `p` 对应 hidden_states 行 `p - B`。锥 `[lo, end)` → 行切片 `[lo - B, end - B)`，**连续尾部对齐
+> end**（mhc `.view()` 要求连续，单请求天然满足）。
 
 **runner 侧（`gpu_model_runner.py`，`_build_attention_metadata` 之后、`set_forward_context` 之前）**：
 
@@ -351,18 +362,17 @@ key = 层各 prefix）。
 
 ```python
 # runner, after building full attn_metadata, when staircase active:
-a, b = staircase_ab[0].tolist()  # A, B for the single request
+a, b = staircase_ab[0].tolist()  # A (G0 hit), B (num_computed) for the single req
 L_top = num_layers_total - 1
 W = sliding_window  # 128
-# 该请求本步调度 token 的位置区间 [b, b + num_scheduled_tokens)
-sched_hi = b + num_scheduled_tokens  # == A 在 spike 假设下
+end = b + num_scheduled_tokens  # 锥右边界（见"锥右边界"决策）
 staircase_layer_metadata = {}
 for l in range(start_layer, end_layer):
-    lo = max(b, a - W * (L_top - l + 1))
-    if lo >= a:  # 锥空（不会发生，lo<=a 恒成立因 L_top-l+1>=1 → a-W*...<=a）
+    lo = max(b, end - W * (L_top - l + 1))
+    if lo >= end:  # 锥空（不会发生，L_top-l+1>=1 → end-W*...<=end）
         continue
-    # 行切片 [lo - b, a - b)，连续
-    row_lo, row_hi = lo - b, a - b
+    # 行切片 [lo - b, end - b)，连续、尾部对齐 end
+    row_lo, row_hi = lo - b, end - b
     n_cone = row_hi - row_lo
     # 为每个 kv_cache_group 用收窄的 cm 重新 build
     for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
@@ -383,9 +393,10 @@ forward_context.staircase_layer_metadata = staircase_layer_metadata
 ```
 
 **关键设计决策**：
-- **seq_len 不收窄，只收窄 query**：锥内 token 的 SWA/MLA K/V 仍从 cache 读 `[0, A)`（A 是 seq_len），
-  只是把 query（本步要算的 token）限制在锥内 `[lo, A)`。这与全矩形路径语义一致——全矩形也是 query
-  = 调度 token，K/V 读 cache。区别只是 query 范围从 `[B, A)` 缩到 `[lo, A)`。
+- **seq_len 不收窄，只收窄 query**：锥内 token 的 SWA/MLA K/V 仍从 cache 读 `[0, seq_len)`（`seq_len`
+  = 该请求本步上下文 `end`），只是把 query（本步要算的 token）限制在锥内 `[lo, end)`。这与全矩形路径
+  语义一致——全矩形也是 query = 调度 token `[B, end)`，K/V 读 cache。区别只是 query 范围从
+  `[B, end)` 缩到 `[lo, end)`。
 - **slot_mapping/block_table 收窄**：锥内 token 的 slot 必须正确指向其 cache 槽（KV 写入用）。连续切片
   `slot_mapping[row_lo:row_hi]` 保持映射一致（slot 按 token 顺序排）。
 - **query_start_loc 重置为 `[0, n_cone]`**：单请求，n_cone 个 query token。
@@ -400,14 +411,15 @@ stair_md = getattr(fc, "staircase_layer_metadata", None)  # None 当 flag 关
 a, b = (fc.staircase_ab[0].tolist() if fc.staircase_ab is not None else (None, None))
 W = self.staircase_window
 L_top = self.num_layers_total - 1
+end = b + num_scheduled_tokens  # 锥右边界（见"锥右边界"决策）
 saved = {}  # 层前保存原 metadata 引用，层后还原
 
 for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
     l = self.start_layer + i  # 全局层号
     if stair_md is not None:
-        lo = max(b, a - W * (L_top - l + 1))
-        row_lo, row_hi = lo - b, a - b
-        # 收窄 hidden_states/positions（连续切片）
+        lo = max(b, end - W * (L_top - l + 1))
+        row_lo, row_hi = lo - b, end - b
+        # 收窄 hidden_states/positions（连续切片，尾部对齐 end）
         hs_narrow = hidden_states[row_lo:row_hi]
         pos_narrow = positions[row_lo:row_hi]
         # 替换该层所有 prefix 的 metadata（attn/swa/compressor/indexer/k_cache）
@@ -423,66 +435,56 @@ for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer))
         for prefix in saved:
             fc.attn_metadata[prefix] = saved[prefix]
         saved.clear()
-        # NOTE: residual/post_mix/res_mix 现在是收窄子集长度，下一层会用更宽子集——
-        # 见下"残差跨层对齐"问题
+        # residual/post_mix/res_mix 是 [lo_l, end) 子集长度；下一层（更宽、lo 更小）取本层残差
+        # 的尾部后缀切片对齐——见下"残差跨层对齐（后缀切片）"。
     else:
         hidden_states, residual, post_mix, res_mix = layer(
             hidden_states, positions, input_ids, post_mix, res_mix, residual,
         )
 ```
 
-**残差跨层对齐（T4 的真实形态，承重）**：每层锥宽不同（input 端宽、output 端窄），但
-`residual`/`post_mix`/`res_mix` 跨层传递。下一层（更靠 input，更宽）的子集是本层子集的**超集**
-（向左扩张）。故跨层传递时：
-- 本层算出 `[lo_l, A)` 的残差（长 `A - lo_l`）。
-- 下一层要 `[lo_{l+1}, A)`（`lo_{l+1} < lo_l`，更宽）。下一层**左端新增** `[lo_{l+1}, lo_l)` 的 token，
-  这些是锥外但下一层要算的——它们的 residual/post_mix/res_mix **本层没算过**。
-- **解法**：下一层首层对这些新 token 走 `mhc_pre`（`residual=None` 路径，`model.py:872-887`）？
-  **不行**——`mhc_pre` 只在整批 residual=None 时触发，且会重置全批。实际应：**残差张量始终按最宽
-  （input 端）锥分配**，每层只在 `[lo_l, A)` 子集上写，左端 `[lo_{l+1}, lo_l)` 的残差由下一层自己算
-  并填入同一全宽张量的对应行。
+**残差跨层对齐（后缀切片，承重）**：锥方向已修正为 **input 端最宽、output 端最窄，所有锥同右边界
+`end`、左边界随层右移**。故每层锥是上一层锥的**后缀**（尾部对齐 `end`，左端逐层右移）：
 
-  ⇒ **正确的残差传递**：维护一个**全宽残差缓冲** `res_full`（宽 = input 端锥 = `[B, A)` 或
-  `[lo_{end}, A)`），每层只计算并写入 `[lo_l, A)` 行；锥外行（`[lo_{end}, lo_l)`）**冻结沿用更靠 input
-  层已算的值**。但 mhc kernel 是 per-token、grid 动态——可以对**全宽**张量调用 mhc，但只对锥内行传入
-  有效 `x`（锥外行传 0 或上轮值），grid 仍跑全宽（不省 GEMM）。
+```
+层 0  (input端): [lo_0 ==============================> end)
+层 1:              [lo_1 =========================> end)   ← lo_1 > lo_0，是层0的后缀
+  ...
+层 42 (output端):                [lo_42 = end-128 ===> end)
+```
 
-  ⇒ **这暴露 T4 的真实约束**：mhc 能吃子集（已验证），但**残差跨层需要全宽缓冲 + 每层部分写入**，
-  否则锥宽变化使残差长度不匹配。两种实现：
-  - **(α) 每层全宽 mhc，锥外行冻结**：mhc 跑全宽 `[lo_end, A)`（不省 mhc 的 GEMM，只省 attn/ffn 的
-    GEMM）。残差连续全宽，跨层对齐天然成立。**简单但省量打折**（mhc 的 GEMM 不省）。
-  - **(β) 每层锥宽 mhc + scatter 回全宽残差**：mhc 跑 `[lo_l, A)`（省 mhc GEMM），结果 scatter 写回
-    全宽 `res_full` 的 `[lo_l, A)` 行。**省量满但需 scatter + 全宽缓冲**。
-  spike 阶段先 **(α)**（正确性优先），验证锥内输出一致后再优化到 (β)。
+每层 `residual`/`post_mix`/`res_mix` 长度 = 该层锥宽。下一层（`lo_{l+1} < lo_l`，更宽）要的残差 =
+本层残差**砍掉左端 `(lo_l - lo_{l+1})` 个**的尾部后缀。即跨层传递只需一个 slice，**无需全宽缓冲、
+无需 scatter**。
 
-> **(α) 的隐含简化**：若每层 mhc 跑全宽，则 `hidden_states`/`residual` 其实不必收窄——只有
-> `attn`/`ffn` 的 GEMM 收窄。但 `attn`/`ffn` 吃 `x`（mhc 输出），`x` 收窄则 mhc 输出也收窄……
-> 矛盾。故 (α) 实际是：**mhc 全宽**，`x` 全宽，但 `attn`/`ffn` 只对锥内行算（锥外行 `x` 不参与
-> attn/ffn 的 GEMM，但其 residual 仍由 mhc 更新）。这要求 attn/ffn 能跳过锥外行——回到 mask 问题。
-> ⇒ **结论：纯 (α) 仍需 attn/ffn 按行 mask 或子集**。最干净是 **(β)**：每层整条流水（mhc+attn+ffn）
-> 全部在锥宽 `[lo_l, A)` 上跑，残差用全宽缓冲 + scatter。这是 spike 要验证的核心机制。
+> 旧 plan 的"全宽残差缓冲 + 每层 scatter 写回 (β)" 是基于**错误的锥方向**（层向 output 变宽，下一层
+> 更宽需左端补新 token）。方向修正后下一层更窄，纯后缀切片即可。**(α)/(β) 全宽缓冲方案作废。**
+>
+> **首层（input 端，最宽）的 `residual=None` 路径**：`DeepseekV4DecoderLayer.forward` 在 `residual is
+> None` 时走 `mhc_pre_tilelang`（`model.py:872-887`）初始化残差。staircase 首层锥 = 最宽锥
+> `[lo_0, end)`，传 `residual=None` 触发 `mhc_pre` 对该子集初始化，正确。后续层传上一层的后缀切片
+> 残差，走 `mhc_fused_post_pre_tilelang`。锥宽变化不影响 mhc（grid 动态、per-token、已验证可吃子集）。
+>
+> **末层 `mhc_post_tilelang`**（`model.py:1097`）：层循环后对最后一层输出收尾。staircase 下最后一层
+> 输出 = 最窄锥 `[end-128, end)`，`mhc_post` 在该子集上跑，输出 128 行 hidden state——这是锥内（output
+> 端）token 的最终 hidden state，正是 staircase 要产出的。锥外 token 的 hidden state 不产出（它们在
+> 更早的、更宽的层算过，但其最终态对 output 端无影响，因依赖只向 pos 更小方向）。
 
 **待 spike 验证项（T3/T4 合并）**：
 1. 收窄 cm 重新 build 出的 SWA/compressor metadata，能否让锥内 attention 正确读 `[0,A)` 的 K/V 并只
    写锥内 token 的 K/V。
-2. 残差全宽缓冲 + scatter 方案 (β) 的跨层对齐正确性。
+2. 残差后缀切片的跨层对齐正确性（每层锥是上层后缀，slice 对齐 `end`）。
 3. 锥边界 SWA 自洽（前述"锥边界 SWA 写入语义"）。
 4. flag 开/关（skip-writeback 两边开）锥内 token 输出逐位一致。
 
 **T4 MegaMoE 残差处理** — mhc 三 kernel **本身**已验证可吃子集（grid 动态、零跨 token reduction、
-hc 全局参数）。但 T3 详细设计暴露了 T4 的**真实难点不在 kernel 单层调用，在残差跨层对齐**：每层锥宽
-不同（input 端宽、output 端窄），`residual`/`post_mix`/`res_mix` 跨层传递时长度不匹配。
+hc 全局参数）。锥方向修正后（input 端宽、output 端窄、同右边界 `end`），每层锥是上层后缀，残差跨层
+只需后缀切片（见 T3"残差跨层对齐（后缀切片）"），**无全宽缓冲、无 scatter、(α)/(β) 作废**。
 
-**正确形态（见 T3 详细设计"残差跨层对齐"）**：维护**全宽残差缓冲**（宽 = input 端锥 `[lo_end, A)`），
-每层只在锥宽 `[lo_l, A)` 上跑整条流水（mhc+attn+ffn），结果 scatter 写回全宽缓冲的对应行；锥外行
-（`[lo_end, lo_l)`）冻结沿用更靠 input 层已算的值。两种实现：
-- **(α) mhc 全宽、attn/ffn 收窄**：简单但 attn/ffn 仍需按行 mask 或子集，省量打折。**纯 (α) 退回
-  mask 问题，不推荐**。
-- **(β) 每层整条流水在锥宽跑 + scatter 回全宽残差**：省量满，需全宽缓冲 + scatter。**spike 采用 (β)**。
-
-> mhc kernel 仍**不改 tilelang 源**——(β) 里 mhc 跑锥宽子集（已验证可行），scatter 是 caller 侧
-> `res_full[lo_l-b : A-b] = mhc_out` 的张量拷贝。T4 工作量 = 全宽残差缓冲分配 + scatter 写回，
-> 非改 kernel。
+**正确形态**：每层整条流水（mhc+attn+ffn）在锥宽 `[lo_l, end)` 上跑，输出残差是 `[lo_l, end)` 子集；
+下一层取本层残差的尾部后缀（砍左端 `lo_l - lo_{l+1}` 个）作初值。首层 `residual=None` 触发 `mhc_pre`
+对最宽锥初始化。mhc kernel **不改 tilelang 源**——子集调用已验证可行，T4 工作量 = 层循环内的切片 +
+后缀传递，非改 kernel。
 
 **待 spike 验证**（与 T3 合并，见上"待 spike 验证项"）：残差全宽缓冲 + scatter 的跨层对齐正确性、
 锥边界 SWA 自洽、flag 开/关锥内 token 逐位一致。
