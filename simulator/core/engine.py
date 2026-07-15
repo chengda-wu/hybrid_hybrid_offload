@@ -55,6 +55,22 @@ class SimulationEngine:
             scheduler_block_size_val = config.kv_cache_block_size
 
         self._main_block_size = main_block_size
+        # Hybrid models derive block_size from layer_groups (max group block
+        # size), so a user-set --kv-cache-block-size is ignored.  Warn only
+        # when the user actually set a non-default value (16 = SimulatorConfig
+        # default) that differs from the derived one — a default-16 run on DSV4
+        # (derived 256) is the expected no-op, not worth noise.
+        if (
+            self._model_arch.is_mla
+            and self._model_arch.compress_ratios
+            and config.kv_cache_block_size != 16
+            and config.kv_cache_block_size != main_block_size
+        ):
+            print(
+                f"Note: kv_cache_block_size={config.kv_cache_block_size} "
+                f"ignored for hybrid model — overridden to {main_block_size} "
+                f"(derived from layer_groups). See --kv-cache-block-size help."
+            )
         self._backend_config = KVBackendConfig(
             model_arch=self._model_arch,
             block_size=main_block_size,
