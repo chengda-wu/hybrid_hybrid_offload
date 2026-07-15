@@ -58,13 +58,6 @@ def main(argv: list[str] | None = None) -> int:
             acceptance_rate=args.acceptance_rate,
             acceptance_rates=args.acceptance_rates,
         )
-        if args.gpu_data_points is not None:
-            # The flag is a JSON string (type=str); parse to the list-of-triples
-            # shape GPUPerfConfig.data_points / PerfDataPoint(*p) expect.  Passing
-            # the raw string would iterate it char-by-char in _fit() and crash.
-            config.gpu_perf = GPUPerfConfig(
-                data_points=json.loads(args.gpu_data_points)
-            )
 
     # Scalar fields: override the JSON value whenever the CLI flag was set to a
     # non-default value.  Checking against the parser default (not None) lets
@@ -79,6 +72,16 @@ def main(argv: list[str] | None = None) -> int:
     _override(config, "random_seed", args.random_seed, 42)
     _override(config, "stall_limit", args.stall_limit, 1000)
     _override(config, "verbose", args.verbose, False)
+
+    # --gpu-data-points applies in BOTH modes (unlike the dataset/spec sub-
+    # config flags, which are from-scratch-only): tuning the GPU perf model
+    # from the CLI is independent of the dataset, so a --config user passing
+    # --gpu-data-points expects it to override the JSON's gpu_perf.data_points.
+    # Default is None (flag omitted) → JSON value (or None) is preserved.
+    if args.gpu_data_points is not None:
+        config.gpu_perf = GPUPerfConfig(
+            data_points=json.loads(args.gpu_data_points)
+        )
 
     engine = SimulationEngine(config)
     report = engine.run()

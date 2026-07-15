@@ -38,9 +38,13 @@ class SyntheticConfig:
 
 @dataclass
 class RequestArrivalConfig:
-    """How requests arrive over time."""
+    """How requests arrive over time.
 
-    num_requests: int = 100
+    Note: the request *count* is controlled by SyntheticConfig.num_requests
+    (the synthetic generator reads that, not this).  This config only governs
+    arrival timing (pattern/rate/stagger).
+    """
+
     arrival_pattern: Literal["burst", "poisson", "staggered"] = "poisson"
     poisson_rate: float = 1.0  # requests per second (real time)
     stagger_delay_steps: int = 5  # steps between staggered arrivals
@@ -110,7 +114,6 @@ class SimulatorConfig:
     """Top-level configuration for a simulation run."""
 
     # Model
-    model_name: str = "deepseek-ai/DeepSeek-V4-Flash"
     model_config_path: str | None = None  # path to config.json; uses defaults if None
 
     # Backend
@@ -199,8 +202,13 @@ class SimulatorConfig:
         )
 
         gpu_data = data.get("gpu_perf", {})
+        raw_points = gpu_data.get("data_points")
+        # Normalize to list[tuple] to match the data_points annotation; JSON
+        # gives list[list[float]], which works at runtime (PerfDataPoint(*p)
+        # unpacks either) but mismatches the declared type.
+        data_points = [tuple(p) for p in raw_points] if raw_points else None
         gpu_perf = GPUPerfConfig(
-            data_points=gpu_data.get("data_points"),
+            data_points=data_points,
             loaded_coeff=gpu_data.get("loaded_coeff"),
             computed_coeff=gpu_data.get("computed_coeff"),
             interaction_coeff=gpu_data.get("interaction_coeff"),
@@ -209,14 +217,12 @@ class SimulatorConfig:
 
         arrival_data = data.get("arrival", {})
         arrival = RequestArrivalConfig(
-            num_requests=arrival_data.get("num_requests", 100),
             arrival_pattern=arrival_data.get("arrival_pattern", "poisson"),
             poisson_rate=arrival_data.get("poisson_rate", 1.0),
             stagger_delay_steps=arrival_data.get("stagger_delay_steps", 5),
         )
 
         return cls(
-            model_name=data.get("model_name", "deepseek-ai/DeepSeek-V4-Flash"),
             model_config_path=data.get("model_config_path"),
             backend=data.get("backend", "vllm"),
             dataset=dataset,

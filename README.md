@@ -115,7 +115,7 @@ python -m simulator.run [OPTIONS]
 | `dataset.synthetic.prompt_length_dist` | `fixed` | `fixed`/`uniform`/`normal`（CLI 的 `--prompt-length` 只设 `fixed`） |
 | `dataset.synthetic.output_length_dist` | `fixed` | `fixed`/`uniform`（CLI 的 `--output-length` 只设 `fixed`） |
 
-> **CLI 与 config 关系**：CLI flag 名是 JSON 字段名的 kebab-case 版（如 `--kv-cache-block-size` ↔ `kv_cache_block_size`、`--swa-full-tokens-ratio` ↔ `swa_full_tokens_ratio`、`--random-seed` ↔ `random_seed`），逐字段 1:1 对应。给 `--config` 时，**顶层标量字段**的 CLI flag（`--backend`、`--model-config-path`、`--use-fp4-indexer`、`--swa-full-tokens-ratio`、`--kv-cache-block-size`、`--max-model-len`、`--num-kv-cache-blocks`、`--random-seed`、`--stall-limit`、`--verbose`）若传了非默认值则覆盖 JSON 中对应字段；数据集/投机解码/GPU perf 的子配置 flag（`--num-requests`、`--prompt-length`、`--output-length`、`--shared-prefix-ratio`、`--num-spec-tokens`、`--accept-mode`、`--acceptance-rate`、`--acceptance-rates`、`--gpu-data-points`）仅在无 `--config` 的从零构建模式下生效，`--config` 模式下被忽略（这些子配置须在 JSON 里设）。
+> **CLI 与 config 关系**：CLI flag 名是 JSON 字段名的 kebab-case 版（如 `--kv-cache-block-size` ↔ `kv_cache_block_size`、`--swa-full-tokens-ratio` ↔ `swa_full_tokens_ratio`、`--random-seed` ↔ `random_seed`），逐字段 1:1 对应。给 `--config` 时，下列 CLI flag 若传了非默认值则覆盖 JSON 中对应字段：顶层标量（`--backend`、`--model-config-path`、`--use-fp4-indexer`、`--swa-full-tokens-ratio`、`--kv-cache-block-size`、`--max-model-len`、`--num-kv-cache-blocks`、`--random-seed`、`--stall-limit`、`--verbose`）以及 `--gpu-data-points`（覆盖 `gpu_perf.data_points`，因为 GPU perf 模型调优与数据集无关，两种模式都应生效）。其余子配置 flag（`--num-requests`、`--prompt-length`、`--output-length`、`--shared-prefix-ratio`、`--num-spec-tokens`、`--accept-mode`、`--acceptance-rate`、`--acceptance-rates`）仅在无 `--config` 的从零构建模式下生效，`--config` 模式下被忽略（这些须在 JSON 里设）。
 
 ### 输出指标
 

@@ -825,13 +825,3 @@ class SGLangSimRequest:
         # not full-sequence positions, to avoid over-deducting on hits.
         self.swa_charged_tokens: int = 0
         self.swa_evicted_charged: int = 0
-
-    @property
-    def num_tokens(self) -> int:
-        """Total tokens on the sim-side handle, INCLUDING pending spec tokens.
-
-        Mirrors ``vLLMSimRequest.num_tokens``.  Currently unused by the
-        scheduler (which reads ``SimRequestState.num_tokens``); kept for
-        parity and potential diagnostics.
-        """
-        return len(self.prompt_token_ids) + len(self.output_token_ids) + len(self.spec_token_ids)

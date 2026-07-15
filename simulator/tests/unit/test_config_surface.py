@@ -384,6 +384,74 @@ class TestGpuDataPointsCliParsing(unittest.TestCase):
         model = GPUPerfModel(cfg)
         self.assertGreater(model.predict(500, 200), 0.0)
 
+    def test_gpu_data_points_overrides_json_in_config_mode(self):
+        # --gpu-data-points applies in --config mode too (GPU perf tuning is
+        # independent of the dataset).  Pre-fix it was silently ignored in
+        # --config mode.  Mirror run.py's --config override: load a JSON with
+        # gpu_perf.data_points set, then apply the CLI flag and confirm the
+        # CLI value wins (parsed to triples, GPUPerfModel fits it).
+        import json
+        from simulator.config.simulator_config import SimulatorConfig, GPUPerfConfig
+        from simulator.metrics.gpu_perf_model import GPUPerfModel
+
+        cfg_path = _write_json({
+            "gpu_perf": {"data_points": [[0, 1, 9.0], [1000, 1, 9.0]]},
+        })
+        try:
+            cfg = SimulatorConfig.from_json(cfg_path)
+            # JSON value present before override.
+            self.assertIsNotNone(cfg.gpu_perf.data_points)
+            # run.py applies this when args.gpu_data_points is not None:
+            cfg.gpu_perf = GPUPerfConfig(
+                data_points=json.loads("[[0,1,0.5],[1000,1,1.5],[0,500,20.0]]")
+            )
+            model = GPUPerfModel(cfg.gpu_perf)
+            self.assertGreater(model.predict(500, 200), 0.0)
+        finally:
+            Path(cfg_path).unlink()
+
+
+class TestDeadConfigFieldsRemoved(unittest.TestCase):
+    """Pin removal of dead SimulatorConfig fields: model_name,
+    RequestArrivalConfig.num_requests, and the backend-handle num_tokens
+    properties (all written/declared but never read).
+    """
+
+    def test_model_name_removed(self):
+        import dataclasses
+        from simulator.config.simulator_config import SimulatorConfig
+
+        names = {f.name for f in dataclasses.fields(SimulatorConfig)}
+        self.assertNotIn("model_name", names)
+
+    def test_request_arrival_num_requests_removed(self):
+        import dataclasses
+        from simulator.config.simulator_config import RequestArrivalConfig
+
+        names = {f.name for f in dataclasses.fields(RequestArrivalConfig)}
+        self.assertNotIn("num_requests", names)
+
+    def test_from_json_tolerates_removed_arrival_num_requests(self):
+        # A JSON still carrying the removed key must not error.
+        path = _write_json({"arrival": {"num_requests": 50, "poisson_rate": 2.0}})
+        try:
+            cfg = SimulatorConfig.from_json(path)
+            self.assertNotIn("num_requests",
+                             {f.name for f in __import__("dataclasses").fields(cfg.arrival)})
+            self.assertEqual(cfg.arrival.poisson_rate, 2.0)
+        finally:
+            Path(path).unlink()
+
+    def test_backend_handles_have_no_num_tokens(self):
+        # The unused num_tokens properties were removed from both handles;
+        # SimRequestState.num_tokens is the single source of truth.
+        from simulator.kv_cache.vllm_backend import vLLMSimRequest
+        from simulator.kv_cache.sglang_backend import SGLangSimRequest
+
+        for cls in (vLLMSimRequest, SGLangSimRequest):
+            self.assertNotIn("num_tokens", cls.__dict__,
+                             f"{cls.__name__} should not define num_tokens")
+
 
 if __name__ == "__main__":
     unittest.main()
