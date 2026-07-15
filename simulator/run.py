@@ -59,7 +59,12 @@ def main(argv: list[str] | None = None) -> int:
             acceptance_rates=args.acceptance_rates,
         )
         if args.gpu_data_points is not None:
-            config.gpu_perf = GPUPerfConfig(data_points=args.gpu_data_points)
+            # The flag is a JSON string (type=str); parse to the list-of-triples
+            # shape GPUPerfConfig.data_points / PerfDataPoint(*p) expect.  Passing
+            # the raw string would iterate it char-by-char in _fit() and crash.
+            config.gpu_perf = GPUPerfConfig(
+                data_points=json.loads(args.gpu_data_points)
+            )
 
     # Scalar fields: override the JSON value whenever the CLI flag was set to a
     # non-default value.  Checking against the parser default (not None) lets

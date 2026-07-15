@@ -360,5 +360,30 @@ class TestFromJsonMlaDetection(unittest.TestCase):
         self.assertEqual(arch.kv_lora_rank, 512)
 
 
+class TestGpuDataPointsCliParsing(unittest.TestCase):
+    """--gpu-data-points is a JSON string on the CLI; run.py must json.loads it
+    before handing it to GPUPerfConfig.  Pre-fix the raw string was passed
+    through, and _fit()'s ``PerfDataPoint(*p) for p in data_points`` iterated
+    the string char-by-char → TypeError crash.
+    """
+
+    def test_gpu_data_points_json_string_parses_to_triples(self):
+        import json
+        from simulator.run import _build_parser
+        from simulator.config.simulator_config import GPUPerfConfig
+        from simulator.metrics.gpu_perf_model import GPUPerfModel
+
+        p = _build_parser()
+        ns = p.parse_args([
+            "--gpu-data-points", "[[0,1,0.5],[1000,1,1.5],[0,500,20.0]]",
+        ])
+        parsed = json.loads(ns.gpu_data_points)
+        cfg = GPUPerfConfig(data_points=parsed)
+        # GPUPerfModel.__init__ calls _fit(), which unpacks each triple into
+        # PerfDataPoint — this is the line that crashed pre-fix on a raw str.
+        model = GPUPerfModel(cfg)
+        self.assertGreater(model.predict(500, 200), 0.0)
+
+
 if __name__ == "__main__":
     unittest.main()

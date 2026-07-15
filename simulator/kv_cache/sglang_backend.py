@@ -69,7 +69,11 @@ class MockTokenToKVPoolAllocator:
         return self._total
 
     def available_size(self) -> int:
-        return self._total - self._next_idx + len(self._free_list)
+        # Capacity spans [offset, offset+total); the OOM check in allocate()
+        # uses the same _offset + _total upper bound, so include _offset here
+        # to keep available_size consistent with that boundary (matters only
+        # when offset>0; offset is currently always 0).
+        return (self._offset + self._total) - self._next_idx + len(self._free_list)
 
     def evictable_size(self) -> int:
         return 0
