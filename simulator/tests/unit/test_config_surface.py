@@ -269,5 +269,96 @@ class TestDeadFieldsAndAbcDefaults(unittest.TestCase):
         self.assertEqual(_Bare().total_blocks, 0)
 
 
+class TestFromJsonMlaDetection(unittest.TestCase):
+    """from_json must detect MLA on a real DSV4 config.
+
+    DSV4's HF config.json has no ``kv_lora_rank`` key — it was renamed to
+    ``q_lora_rank``.  Pre-fix, from_json read only ``kv_lora_rank`` → None →
+    is_mla stayed False → layer_groups collapsed to a single "full" group,
+    silently producing the wrong (single-pool) KV layout whenever a user
+    passed ``--model-config-path <real DSV4 config.json>``.  The default
+    (hardcoded) path was unaffected, so the bug was latent.
+
+    This synthesizes a minimal DSV4-style config (using q_lora_rank, no
+    kv_lora_rank) so the test is self-contained and portable.
+    """
+
+    def _dsv4_style_config(self) -> dict:
+        # Real DSV4 per-layer pattern: 2 SWA(0), then alternating 4/128.
+        # The trailing MTP layer (ratio 0) is omitted here — layer_groups
+        # only counts cr==4 / cr==128, so it doesn't affect the assertion.
+        compress_ratios = [0, 0]
+        for i in range(41):
+            compress_ratios.append(4 if i % 2 == 0 else 128)
+        return {
+            "model_type": "deepseek_v4",
+            "num_hidden_layers": 43,
+            "num_attention_heads": 64,
+            "num_key_value_heads": 1,
+            "head_dim": 512,
+            "hidden_size": 4096,
+            "qk_rope_head_dim": 64,
+            "q_lora_rank": 1024,  # DSV4 key (NOT kv_lora_rank)
+            "compress_ratios": compress_ratios,
+            "sliding_window": 128,
+            "torch_dtype": "bfloat16",
+            "vocab_size": 129280,
+            "num_nextn_predict_layers": 1,
+            "index_head_dim": 128,
+        }
+
+    def test_q_lora_rank_triggers_mla_detection(self):
+        from simulator.config.model_config import ModelArchitecture
+
+        path = _write_json(self._dsv4_style_config())
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+
+        self.assertTrue(arch.is_mla, "q_lora_rank must set is_mla=True")
+        self.assertEqual(arch.kv_lora_rank, 1024)
+
+    def test_from_json_produces_six_hybrid_groups(self):
+        from simulator.config.model_config import ModelArchitecture
+
+        path = _write_json(self._dsv4_style_config())
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+
+        groups = arch.layer_groups
+        # Must NOT be the single-group fallback [("full", 0, 1, 43)].
+        self.assertNotEqual(groups, [("full", 0, 1, 43)])
+        names = [g[0] for g in groups]
+        self.assertEqual(names, [
+            "swa", "c4_compressor", "c128_compressor",
+            "c4_mla", "c128_mla", "c4_indexer",
+        ])
+        # Counts must match DSV4: SWA=43, C4=21, C128=20.
+        by_name = {g[0]: g[3] for g in groups}
+        self.assertEqual(by_name["swa"], 43)
+        self.assertEqual(by_name["c4_mla"], 21)
+        self.assertEqual(by_name["c128_mla"], 20)
+        # And the per-token byte cost is the DSV4 584.
+        self.assertEqual(arch.kv_bytes_per_token, 584)
+
+    def test_legacy_kv_lora_rank_still_detected(self):
+        # DSV2/V3 use kv_lora_rank; that path must not regress.
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = self._dsv4_style_config()
+        cfg.pop("q_lora_rank")
+        cfg["kv_lora_rank"] = 512
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertTrue(arch.is_mla)
+        self.assertEqual(arch.kv_lora_rank, 512)
+
+
 if __name__ == "__main__":
     unittest.main()

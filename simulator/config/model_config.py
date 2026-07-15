@@ -158,7 +158,13 @@ class ModelArchitecture:
                 "num_attention_heads", 32
             )
 
-        kv_lora_rank = cfg.get("kv_lora_rank")
+        # MLA flag: DSV2/V3 use ``kv_lora_rank``; DSV4 renamed it to
+        # ``q_lora_rank`` (the V4 config has no ``kv_lora_rank`` key, so reading
+        # only that key left kv_lora_rank=None → is_mla stayed False → the
+        # hybrid layer_groups collapsed to a single "full" group).  Accept
+        # either key; the value is only used as a non-None MLA sentinel (it
+        # never enters the per-token byte math).
+        kv_lora_rank = cfg.get("kv_lora_rank") or cfg.get("q_lora_rank")
         qk_rope_head_dim = cfg.get("qk_rope_head_dim")
 
         # Per-layer compress ratios (DeepSeek V4); keep the full list
