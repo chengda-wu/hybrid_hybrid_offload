@@ -85,12 +85,17 @@ kernel，吃原 slot）；attention 及其 compressed slot 不动。
 即得全 prompt 的 G0 命中 A，跨 chunk 不变。scheduler.py 无逻辑改动（DSV4 走常规路径，
 `scheduler.py:712`）。
 
-> **待澄清：A 的“request 生命周期内固定”是否跨 preemption。** `_preempt_request` 会释放请求
-> blocks、把 `num_computed_tokens` 清零并将同一逻辑请求放回 waiting queue；恢复调度时会重新执行
-> prefix-cache lookup。这里的“request 生命周期”可能仅指一次 admission/block-residency 周期，也
-> 可能指包含 preemption/resume 的完整逻辑请求。实现前须明确：preemption 是否结束当前 A 的有效
-> 周期，以及 resume lookup 是否无条件用新结果覆盖 `g0_hit_length`（包括新 A=0）。若能保证覆盖，
-> 无需规定 preemption 时单独清零；若不能，则须补充失效处理，避免沿用已释放 blocks 对应的旧 A。
+> **已核实：A 跨 preemption 由 resume lookup 无条件覆盖，无需 preempt 时单独清零。** `_preempt_request`
+> （`scheduler.py:1131`）释放 blocks、把 `num_computed_tokens` 清零（L1144）并放回 waiting queue
+> —— **不动** `g0_hit_length`（保留旧值）。但 `g0_hit_length` 的唯一写者是
+> `get_computed_blocks`（`kv_cache_manager.py:243`，含 `A=0` 走 L219 早退赋 0），而 resume 调度时
+> `num_computed_tokens==0` 必命中 `scheduler.py:676` 守卫 → 重跑 lookup → 覆盖旧 A。唯一把 A 灌进
+> batch 的 `input_batch.add_request`（`input_batch.py:391` 读 `request.g0_hit_length`）必在
+> `get_computed_blocks` 之后执行；preempted 请求在 runner 侧被 `remove_request`
+> （`gpu_model_runner.py:1186`），stale A 不留 batch；`staircase_ab` 每步现读现建（runner L4352），
+> 无持久 stale。故 invariant 成立：**forward 消费 A 时 A 必然新鲜**。边界：`reset_prefix_cache`
+> 强制 preempt（runner L1183 注释）把 resumed_req_ids 纳入 unscheduled 集 → 同样 remove→重 add→
+> A 刷新。preempt 时单独清零 `g0_hit_length` 是冗余但无害的防御（当前未加，靠 resume 覆盖）。
 
 **S4 per-request A 上 GPU** —
 - `vllm/v1/worker/input_batch.py`：加 `g0_cached_prefix_len_cpu` 数组（仿
@@ -128,8 +133,9 @@ kernel，吃原 slot）；attention 及其 compressed slot 不动。
   （第一段填满 G0，再发分化第二请求），断言 flag 开/关 logits 逐位一致。
 - **单测**：`A>B` 小模型；断言 `[B,A)` 边界 token 的 G0 slot 字节不变（写计数 0），而
   `[B,A)` state cache 仍被 `save_partial_states` 写入。
-- **待补 preemption 用例**：待上述生命周期语义明确后，覆盖 resume lookup 得到不同 A（尤其 A=0）
-  的情况，验证实现符合选定语义且不会误用旧命中边界。
+- **preemption 用例**：覆盖 resume lookup 得到不同 A（尤其缓存被 evict 后 A=0）的情况，断言
+  resume 后 forward 用的 A 是新值（而非 stale 旧 A）。语义已核实（见 S3 注），此用例回归保护该
+  invariant 不被回归破坏。
 - **省量**：Nsight 数 `compress_norm_rope_store` launch；flag 开时 `[B,A)` 边界 launch 消失。
   D=5500、cr=128 测 delta 步 GPU 时间。
 
@@ -322,7 +328,7 @@ token 安全。
 
 **T1 复用 A 透传** — 三角边界用每请求 A（=G0 命中长度），Feature 1 的 S2-S4 已建立
 `request.g0_hit_length` → `CommonAttentionMetadata.g0_cached_prefix_len` 通道，直接复用；跨
-preemption 的取值规则取决于 S3 待澄清的生命周期语义。
+preemption 由 resume lookup 无条件覆盖（见 S3 已核实段），staircase 每步现读现建、无 stale。
 
 **T2 三角边界计算** — runner 侧（`gpu_model_runner.py` prefill eager 路径）按请求算每层 token
 下界 `lo_L = max(B, end - W·(L_top-L+1))`（`end = B + num_scheduled`），产出 per-request per-layer
@@ -552,8 +558,8 @@ narrowing 路径同时实现了 T4 的残差跨层后缀传递。故 **T4 无独
    DSV4 不禁用。仓库 CLAUDE.md 的"no chunked prefill"指 **simulator**，不是真实引擎。故 delta
    `[B,A)` **可能跨多个 prefill chunk**，staircase 三角边界须按 chunk 起止切分，不能假设
    "delta 在单次 prefill 内"。未发生 preemption 时，首次 lookup 用全 prompt 长度
-   `request.num_tokens-1` 得到 A，后续 chunk 沿用；跨 preemption 的 A 是否延续或由 resume lookup
-   覆盖，取决于 S3 待澄清的生命周期语义。每 chunk 内可参与三角的 token 范围 = 该 chunk 与当时
+   `request.num_tokens-1` 得到 A，后续 chunk 沿用；preempt 后由 resume lookup 无条件覆盖（见 S3
+   已核实段）。每 chunk 内可参与三角的 token 范围 = 该 chunk 与当时
    有效 `[B,A)` 的交集，三角边界需按 chunk 逐段定。这是 staircase 的实质复杂度，设计阶段需明确
    chunk 化三角语义。
 5. **锥边界 SWA 写入正确性（关键校验点）**：见"MegaMoE 残差融合 kernel"节的"锥边界 SWA 写入语义"。
