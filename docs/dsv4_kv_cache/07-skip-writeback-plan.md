@@ -238,24 +238,65 @@ KV 写（`attention.py:550/569/583`）并把该 token gather 输出置 0（`spar
 对真实 token 是破坏，且不省 GEMM（Q norm/RoPE/attn/MLP 按稠密张量整张跑）。`-1` 只对 padding
 token 安全。
 
-收窄策略（自顶向下，请求 r）：距顶层 k 层只算 `[max(B, A-W·(k+1)), A)`，每层 token 集合是下层
-的前缀，保证 hidden state 层间传递连续；底层 = 全 `[B,A)`，与既有全矩形在底层对齐。
+收窄策略（请求 r）：output 端（顶层）最窄 `[A-W, A)`，input 端（底层）最宽
+`[max(B, A-W_eff), A)`。距顶层 k 层只算 `[max(B, A-W·(k+1)), A)`。每层 token 集合是**更靠 output
+层的超集**（向 pos 更小方向逐层扩张），故层间传递时下层（更靠 input）覆盖上层全部 token、并向
+左扩张——hidden state 层间传递连续（上层算过的 token 在下层继续算，下层多算的左侧 token 为上层
+提供窗口上下文）。底层 = 全 `[B,A)`，与既有全矩形在底层对齐。
 
-### 主要工程障碍：MegaMoE 残差融合 kernel（非绝墙）
+### MegaMoE 残差融合 kernel：已验证可吃子集（原 T4 风险点，已降级）
 
-核验 `DeepseekV4DecoderLayer.forward`（`model.py:861-933`）发现真正难点**不在 attention 层**，
-在残差流：
+初版计划把 `mhc_*_tilelang` 当作"主要风险点，需先做可行性 spike"。**经核验三 kernel 后推翻此定性**：
+它们都能直接吃更短的 token 子集，无需写 mask 变体。
 
-- 层状态 `residual`/`post_mix`/`res_mix` 跨层传递，由 `mhc_fused_post_pre_tilelang`
-  （L889、L913）**按整张 tile 融合更新**。
-- `x = self.attn(positions, x)`（L909）→ 残差融合（L913）→ `self.ffn(x)`（L932）共用同一 token
-  集。若某层只对锥内 token 算 attn，输出 `x` 变短，但 `residual` 是全张量 →
-  `mhc_fused_post_pre_tilelang(x_short, residual_full, ...)` 形状不匹配。
-- 故"按层收窄"须**同时收窄 `residual`/`post_mix`/`res_mix`** 并保持与 `x` 同子集，即锥外 token
-  的残差流要"冻结"沿用上层值。而 `mhc_*_tilelang` 按整张 tile 操作，无法 cheaply 跳过锥外 token。
+核验对象（`vllm/model_executor/kernels/mhc/tilelang.py` + `tilelang_kernels.py`）：
+`mhc_pre_tilelang`（L90）、`mhc_post_tilelang`（L303 / kernel L482）、
+`mhc_fused_post_pre_tilelang`（L326）。结论依据：
 
-**结论**：staircase 需要 (a) 一个支持 token 子集 / mask 的 `mhc_*_tilelang` 变体，或 (b) 对锥内
-子集单独算 mhc 再 scatter 写回全张量残差。这是主要工作量所在，但**不改变数学可行性**。
+1. **grid 按 token 维动态**：`num_tokens = T.dynamic("num_tokens")`，grid 由输入 token 维推出
+   （`tilelang.py:162-163/402-403`，`tilelang_kernels.py:88/234/396/503/560`）。传更短张量 →
+   自动更少 block，**非硬编码全序列长**。
+2. **零跨 token reduction**：每个 token 是独立 grid block。Sinkhorn 只在 `hc_mult` 轴归约
+   （`tilelang_kernels.py:135-153/276-291`），RMS sqrsum 与 GEMM 均 per-token
+   （L97-99/244-245/576-582）。**没有任何跨 token 的求和/归一**。
+3. **hc 参数是全局学习参数**：`hc_attn_fn`/`hc_ffn_fn`（`hc_mult3, hc_mult*hidden`）、`hc_scale`
+   （`(3,)`）、`hc_base`（`(hc_mult3,)`）都不依赖 token 数（`tilelang.py:148-151/388-390`）；
+   per-token 混合权重在 kernel 内逐 token 重算，token 数逐层变化**不破坏**它们。
+4. **残差状态 per-token、跨层逐字传递**：`residual`/`post_mix`/`res_mix` 形状 `(num_tokens,…)`，
+   无 batch 全局状态，无 order/count-sensitive per-token 状态（`model.py:872-933`）。token `t` 的
+   残差只依赖 token `t` 自己的历史。
+
+**结论**：只要 caller 传**一致切片**的 `x`/`residual`/`post_mix`/`res_mix`（同子集、同长度），
+三 kernel 直接正确。T4 从"需写 mask 变体 / spike"降级为"保证子集连续性 + 一致切片"。
+
+### 承重约束（核验得出，T3/T4 落实时必须遵守）
+
+- **连续性（最硬约束）**：三 launcher 都做 `residual.view(-1, hc_mult, hidden_size)`
+  （`tilelang.py:162/402`）与 `x.view(num_tokens, hidden_size)`（L404）。boolean-mask gather
+  产出**非连续**张量，`.view()` 会 raise。**连续切片 `x[:k]` 安全**；mask 子集须先
+  `.contiguous()`。staircase 子集是 `[lo_L, A)`（尾部对齐 A）：
+  - **单请求**：是 token 段内尾部连续切片 → `x[offset:]` 连续 ✓。
+  - **多请求混批**：各请求尾部子段在 batch 维拼接，需按请求 gather + `cat` + `.contiguous()`
+    （非连续，必须拷贝）。这是多请求混批的实质开销。
+- **`n_splits`/`use_small_fma` 随 token 数变**：`compute_num_split`（`tilelang_kernels.py:30-40`，
+  调于 `tilelang.py:172/421`）与 `use_small_fma`（≤16 token，L411-415）按 token 数选不同
+  `n_splits`/kernel 变体。**仅影响性能与核选择，非正确性**（split-K 累加对任意 n_splits 正确）。
+  顶层锥宽 128 远大于 16，但深层 chunk 边界可能落入小 token 路径——需测性能而非正确性。
+- **零 token 无显式 guard**：`hc_head_fused_kernel_tilelang` 有 `if num_tokens==0: return`
+  （`tilelang.py:626-627`），但**这三 kernel 没有**。空张量 launch 空 grid、返回零大小输出——
+  可能 OK 但未测。锥内永远 ≥128 token，不会空；但**chunk 边界**可能产生空子集，须显式跳过。
+- **真·跨 token 依赖在 `self.attn`（L909），不在 mhc**：mhc 收窄安全，但 `self.attn`/`self.ffn`
+  在收窄的 `x` 上跑。锥内 attention 只算锥内 token 的 Q，K/V 从 cache 读——这正是 staircase 要的
+  （锥外 token 本就不该影响锥内输出，因依赖只向 `pos` 更小方向；锥内 token 的 SWA 窗口 `[p-128,p]`
+  可能滑入锥外，但那些锥外 token 的 SWA K/V **本次必须写**——见下"锥边界 SWA 写入"）。须保证
+  收窄后 attention 的 `block_table`/`slot_mapping`/`seq_lens` 对锥内 token 正确。
+- **锥边界 SWA 写入语义**：锥内 token `p` 的 SWA K/V 未缓存（SWA 命中到 B），须按层写入
+  （`save_partial_states` 同理对 compressor state）。staircase **只跳锥外 token 的 hidden-state
+  计算**，锥内 token 的 SWA/state 写入照常。锥内 `p∈[lo_L,A)` 的 SWA 窗口 `[p-128,p]` 在
+  `p<lo_L+128` 时会滑入锥外 `[lo_L-128, lo_L)`——这部分锥外 token 的 SWA K/V 是否已由更早的
+  prefill chunk 写入？**若 `[lo_L-128, lo_L)` 已在前序 forward 中写入 cache，则锥内 attention
+  读 cache 即可**；否则锥内 SWA 读到未写条目（错误）。这是 staircase 正确性的**关键校验点**：
+  须确认锥内 SWA 窗口覆盖的锥外 token，其 K/V 在更早的层/chunk 已落 cache。
 
 ### 实现路径（分步）
 
@@ -271,10 +312,25 @@ token 安全。
 .attn_metadata[prefix]`，每层独立 prefix，`compressor.py:137`）注入该层。**不改 dataclass**，
 只按层替换张量引用。SWA/compressor/indexer 每层共享同一子集（锥由 W=128 统一）。
 
-**T4 MegaMoE 残差处理** — 解决 T3 的残差形状问题：锥内子集算 `mhc_*` 后 scatter 写回全张量
-`residual`/`post_mix`/`res_mix`（锥外 token 残差冻结）。需评估是写 mhc mask 变体还是子集重算 +
-scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 开销）。**T4 是主要风险点**，
-设计阶段需先做可行性 spike。
+**T3 注入机制（已核验可行）**：每层 attn/compressor/swa/indexer 有独立 `self.prefix`
+（`attention.py:167/634/718`，如 `f"{layer_prefix}.compressor"`），forward 时各自
+`get_forward_context().attn_metadata[self.prefix]` 取自己 metadata。`attn_metadata` 是
+`dict[str, AttentionMetadata]`，**forward 期动态设置**（`forward_context.py:132/139`）。故 T3
+注入点 = 层循环内、调 `layer()` 前，把 `get_forward_context().attn_metadata[prefix]` 替换为该层
+收窄版。
+
+> **承重风险——缓存复用污染**：runner 侧 attn_metadata 按 `(KVCacheSpec, builder type)` 缓存
+> 复用，**组内多层共享同一 metadata 对象**（`gpu_model_runner.py:2454-2469` `cached_attn_metadata`）。
+> T3 **绝不能 mutate 该共享对象**（会污染同组其他层）。必须为每层构造**独立**的收窄 metadata
+> （或独立张量引用），在层循环内临时替换、层后还原。这是 T3 实现的首要正确性约束。
+
+**T4 MegaMoE 残差处理** — **已降级**（见上"MegaMoE 残差融合 kernel：已验证可吃子集"）。三 kernel
+grid 动态、零跨 token reduction、hc 全局参数，**直接吃一致切片的子集**即可，无需 mask 变体。
+T4 工作量收敛为：保证 `x`/`residual`/`post_mix`/`res_mix` 四者同子集同长度、连续（多请求混批需
+gather+cat+contiguous），并在层循环内把这四者一起按 `lo_L` 收窄传递。锥外 token 不参与本层
+hidden-state 计算（其残差无需"冻结沿用"——因为锥外 token 的输出本就不被任何下游锥内 token 依赖，
+依赖只向 pos 更小方向）。**唯一仍需 spike 的点是上节"锥边界 SWA 写入语义"**：确认锥内 SWA 窗口
+覆盖的锥外 token K/V 已在更早层/chunk 落 cache。
 
 **T5 配置 flag** — `vllm/config/cache.py` 加 `enable_staircase: bool = False`，gate 在
 `DeepseekV4Model.forward`。**硬依赖 Feature 1**：`enable_staircase=True` 隐含强制
@@ -288,7 +344,9 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
    （`compilation.py:62`）下 **prefill 走 NONE（eager）**，无约束。**限制**：与 `FULL`
    （prefill 也 capture）不兼容，flag 检查里拒绝 `FULL` 或回退全矩形。
 2. **多请求混批**：边界 per-request，收窄后 token 集合需在 batch 维重拼 `query_start_loc`
-  （批内 D 不同 → 总 token 数动态）。eager prefill 下可接受。
+  （批内 D 不同 → 总 token 数动态）。eager prefill 下可接受。**且子集非连续**：各请求尾部子段
+  `[lo_L_r, A_r)` 拼接须 `gather`+`cat`+`.contiguous()`（mhc launcher 的 `.view()` 要求连续，见
+  承重约束）。单请求则是连续切片，无此开销。
 3. **C4 窗口(8)被 W=128 拉平**：统一用 W=128 定锥，C4 本可更窄但被拉平，省量略低于上界。
 4. **chunked prefill（真实 vLLM 默认开）**：`enable_chunked_prefill=True`（`scheduler.py:84`），
    DSV4 不禁用。仓库 CLAUDE.md 的"no chunked prefill"指 **simulator**，不是真实引擎。故 delta
@@ -297,13 +355,18 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
    `get_computed_blocks` 用全 prompt 长度 `request.num_tokens-1`，首 chunk 即得全 prompt 的 A），
    跨 chunk 不变；但每 chunk 内可参与三角的 token 范围 = 该 chunk 与 `[B,A)` 的交集，三角边界
    需按 chunk 逐段定。这是 staircase 的实质复杂度，设计阶段需明确 chunk 化三角语义。
+5. **锥边界 SWA 写入正确性（关键校验点）**：见"MegaMoE 残差融合 kernel"节的"锥边界 SWA 写入语义"。
+   锥内 token 的 SWA 窗口可能滑入锥外，须确认那些锥外 K/V 已在更早层/chunk 落 cache，否则锥内
+   attention 读到未写条目。**这是 staircase 正确性的首要验证项**，优先于性能。
 
 ### 待改文件（Feature 2）
 
 - `vllm/config/cache.py` — `enable_staircase` flag。
-- `vllm/models/deepseek_v4/nvidia/model.py` — `DeepseekV4Model.forward` 层循环按层收窄 + 注入。
-- `vllm/models/deepseek_v4/nvidia/model.py`（mhc kernel 调用处）/ 对应 tilelang 源 — T4 残差
-  子集/scatter 支持。
+- `vllm/models/deepseek_v4/nvidia/model.py` — `DeepseekV4Model.forward` 层循环按层收窄 + 注入；
+  `DeepseekV4DecoderLayer.forward` 内 `mhc_*` 调用透传收窄的 `x`/`residual`/`post_mix`/`res_mix`
+  （**不改 tilelang 源**，三 kernel 已支持子集，仅保证一致切片 + 连续性）。
+- `vllm/models/deepseek_v4/attention.py`、`compressor.py` — 接受按层收窄 metadata（复用 prefix
+  通道，不改 dataclass；注意不得 mutate runner 缓存的共享 metadata 对象，见 T3 承重风险）。
 - `vllm/models/deepseek_v4/attention.py`、`compressor.py` — 接受按层收窄 metadata（复用 prefix
   通道，不改 dataclass）。
 - `vllm/v1/worker/gpu_model_runner.py` — prefill eager 路径准备 per-request per-layer 边界。
@@ -333,5 +396,7 @@ scatter（前者性能好但改 tilelang kernel，后者实现快但有 scatter 
 1. **阶段一**：Feature 1（skip-writeback），S1-S5，独立可落地，先合入。建立 A 透传基础设施。
    此阶段本身即有收益（省 `[B,A)` 边界 token 的 compress 聚合 + G0 写），且是阶段二的硬前置。
 2. **阶段二**：Feature 2（staircase），**硬依赖阶段一**（`enable_staircase` 强制
-   `enable_skip_writeback`）。**先做 T4 可行性 spike**（mhc 残差子集/scatter），spike 通过再推进
-   T1-T5。先单请求、eager prefill、`FULL_DECODE_ONLY` 下验证，再扩多请求混批。
+   `enable_skip_writeback`）。mhc 残差 kernel 已验证可吃子集，**不再需要 T4 spike**；改为**先做
+   "锥边界 SWA 写入正确性" spike**（确认锥内 SWA 窗口覆盖的锥外 token K/V 已在更早层/chunk 落
+   cache），通过再推进 T1-T5。先单请求（连续切片，无 contiguity 开销）、eager prefill、
+   `FULL_DECODE_ONLY` 下验证，再扩多请求混批（需 gather+cat+contiguous）。
