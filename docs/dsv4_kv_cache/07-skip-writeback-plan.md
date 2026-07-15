@@ -317,11 +317,12 @@ token 安全。
 下界 `lo_L = max(B, end - W·(L_top-L+1))`（`end = B + num_scheduled`），产出 per-request per-layer
 的 `[lo_L, end)` 区间。W=128。
 
-**T3 层循环按层收窄** — `DeepseekV4Model.forward`（`model.py:1077-1085`）层循环内：依据当前层
-`lo_L` 切片 `hidden_states`/`positions`，构造收窄的 `slot_mapping`/`block_table`/
-`token_to_req_indices`/`query_start_loc`，经 `forward_context`（`get_forward_context()
-.attn_metadata[prefix]`，每层独立 prefix，`compressor.py:137`）注入该层。**不改 dataclass**，
-只按层替换张量引用。SWA/compressor/indexer 每层共享同一子集（锥由 W=128 统一）。
+**T3 层循环按层收窄** — `DeepseekV4Model.forward`（`model.py`）层循环内：依据当前层
+`lo_L` 切片 `hidden_states`/`positions`，把该层各 prefix 的 metadata **收窄**到锥
+`[lo_L, end)`，经 `forward_context`（`get_forward_context().attn_metadata[prefix]`，每层独立
+prefix，`compressor.py:137`）注入该层。**不改 dataclass、不重 build**——收窄 = 对 runner 正常
+`build()` 产出的完整 metadata 做**尾切片 + 标量重算**（见下"收窄方式"）。SWA/compressor/indexer
+每层共享同一子集（锥由 W=128 统一）。
 
 **T3 注入机制（已核验可行）**：每层 attn/compressor/swa/indexer 有独立 `self.prefix`
 （`attention.py:167/634/718`，如 `f"{layer_prefix}.compressor"`），forward 时各自
@@ -336,13 +337,46 @@ token 安全。
 > mutate 该共享对象**（会污染同组其他层）。必须为每层构造**独立**的收窄 metadata
 > （或独立张量引用），在层循环内临时替换、层后还原。这是 T3 实现的首要正确性约束。
 
-#### T3 详细设计（伪代码级，已对照真实代码）
+#### T3 收窄方式：切片真实 build，而非逐层重 build / triton（2026-07 决策）
 
 **核心难点**：收窄 hidden_states 不够——attention/compressor/swa/indexer 各自从
 `forward_context.attn_metadata[prefix]` 读 `slot_mapping`/`block_table`/`seq_lens`/
 `query_start_loc`/`positions`（SWA builder L385-391 全从 `common_attn_metadata` 取）。这些必须与
-收窄后的 token 子集**一致**，否则 slot 错位或形状不匹配。且 builder 在 runner 侧（model 侧拿不到），
-故选 **方案 2：runner 预建 per-layer 收窄 metadata，model 层循环只读取替换**。
+收窄后的 token 子集**一致**，否则 slot 错位或形状不匹配。
+
+**方案选择（核验 DSV4 四个 builder 的 `build()` 后定）**：逐层调用 `builder.build()` 太慢；曾考虑
+triton 算子重算派生量。但逐 kernel 核验（SWA `_compute_swa_indices_and_lens_kernel`、
+`_compute_prefill_metadata_kernel`；MLA `_build_c128a_topk_metadata_kernel`；indexer
+`_build_prefill_chunk_metadata_kernel`）后确认：**单请求 prefill 下，每个 per-token 派生量只依赖
+该 token 自己的 position `p` + 不变的 `block_table`/`seq_lens=end`，与 batch 里其它 token 无关**。
+具体：
+- SWA `prefill_swa_indices[i]`/`prefill_swa_lens[i]`：每 token 环窗口只由 `p`+block_table 决定。
+- MLA `c128a_prefill_topk_indices` 行：prefill 分支写 `local_indices[j]=j if j<(p+1)//cr else -1`，
+  内容只依赖 `p`。
+- indexer `cu_seq_len_ke[out] = (p+1)//cr`（`start_pos + offset = p` 恒成立，`start_pos` 逐层虽变但
+  `start_pos+offset` 恒等于 `p`）；`cu_seq_len_ks[out]=0`（单请求）；`cu_seq_lens`/`token_to_seq`
+  是 KV 侧、由 `seq_lens=end` 构建，与 `lo` 无关。
+
+故收窄 = **对完整 build 输出做尾切片 `full[lo-B:]`（per-token 张量，view 免拷贝）+ Python 重算少数
+per-request 标量**（`query_start_loc=[0,end-lo]`、`num_actual_tokens=end-lo`、
+`prefill_gather_lens=(end-lo)+min(lo,W-1)`、`token_start=lo`/`token_end=end` 等）。**无 kernel、无
+逐层 `build()`**。实现见 `vllm/models/deepseek_v4/nvidia/staircase.py`（四个 narrow 函数 +
+`narrow_metadata` 分发）。
+
+> **为什么不用 triton 算子重算派生量**：① 不必要——慢的是逐层完整 `build()`，而完整步本来就已 build
+> 一次，锥层只需切片那一次 build 的输出；切片是 view，比 kernel launch+写还便宜。② 违反父仓 CLAUDE.md
+> 硬规则"KV cache 相关逻辑必须调真实 vllm 函数、不得手搓"——一个重算 `build()` 派生量（压缩 slot
+> mapping、c128a topk、indexer `cu_seq_len_ke`）的 triton kernel 就是手搓 build() 逻辑。切片真实
+> `build()` 的*输出*是消费、不是重实现，合规。
+
+> **为什么限单请求（正确性前提，非优化）**：锥是 per-request 概念（不同请求 B/A/seq_len 不同，锥边界
+> 不同）；token 轴按请求**连续排布**。多请求下对整条 token 轴做尾切片 `full[N-k:]` 切到的是**最后一个
+> 请求**的尾部，而非"每请求各自收窄成自己的锥"——没有对应物。要 per-request 不同 `lo` 得对每请求段
+> 分别切再重排（gather，非切片），并重建 `query_start_loc`/`token_to_req_indices`/`block_table`。
+> 且 indexer `cu_seq_lens` 跨请求累积，收窄某请求的 query 段要重算前后所有请求的 `token_to_seq`。
+> 故 staircase **只单请求 prefill 启用**（runner gate `num_reqs==1 and prefill and A>B`），narrow
+> helper 内 `assert` 单请求 prefill，fail-closed。多请求 staircase 是另一量级改动，需先解 compressor
+> state-cache 跨层缓存前置，不在本计划。
 
 **单请求语义澄清（承重）**：prefill 时 `num_computed_tokens=B`，本步调度的 token 覆盖位置
 `[B, end)`（`end = B + num_scheduled`）。锥是 `[lo_L, end)`（右边界 = `end`，见"锥右边界"决策）。
@@ -354,43 +388,58 @@ prefill 内**（即 `end >= A`，无 chunked prefill 切分——见工程约束
 > 位置 `p` 对应 hidden_states 行 `p - B`。锥 `[lo, end)` → 行切片 `[lo - B, end - B)`，**连续尾部对齐
 > end**（mhc `.view()` 要求连续，单请求天然满足）。
 
-**runner 侧（`gpu_model_runner.py`，`_build_attention_metadata` 之后、`set_forward_context` 之前）**：
+**runner 侧（`gpu_model_runner.py`）**：只发激活信号 `staircase_ab`（已实现，L4350 一带：当
+`enable_staircase and num_reqs==1 and prefill and A>B` 时建 `tensor([[A,B]])`，经
+`set_forward_context(staircase_ab=...)` 传入）。**不预建收窄 metadata**——收窄由 model lazy 完成
+（方案 B，见下）。
 
-当 `staircase_ab` 非空（单请求 prefill + A>B）时，为每个 cone 层 `l ∈ [start_layer, end_layer)` 预建
-收窄 metadata，存入 `forward_context`（新字段 `staircase_layer_metadata: dict[str, AttentionMetadata]`，
-key = 层各 prefix）。
+**model 侧（`DeepseekV4Model.forward` 层循环，`model.py`）**：`stair_md` 是 model 自有的空 dict
+（不再由 runner 预填）。层循环里，对当前层各 prefix，首次用到时从 `fc.attn_metadata[prefix]`（runner
+正常 `build()` 的完整对象）调 `narrow_metadata(...)` 切片收窄、缓存进 `stair_md`，再 swap 进
+`attn_metadata[prefix]`、层后还原。
 
 ```python
-# runner, after building full attn_metadata, when staircase active:
-a, b = staircase_ab[0].tolist()  # A (G0 hit), B (num_computed) for the single req
-L_top = num_layers_total - 1
-W = sliding_window  # 128
-end = b + num_scheduled_tokens  # 锥右边界（见"锥右边界"决策）
-staircase_layer_metadata = {}
-for l in range(start_layer, end_layer):
-    lo = max(b, end - W * (L_top - l + 1))
-    if lo >= end:  # 锥空（不会发生，L_top-l+1>=1 → end-W*...<=end）
-        continue
-    # 行切片 [lo - b, end - b)，连续、尾部对齐 end
-    row_lo, row_hi = lo - b, end - b
-    n_cone = row_hi - row_lo
-    # 为每个 kv_cache_group 用收窄的 cm 重新 build
-    for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
-        cm_narrow = copy(cm_base)
-        cm_narrow.positions = cm_base.positions[row_lo:row_hi]          # 连续切片
-        cm_narrow.slot_mapping = slot_mappings[kv_cache_gid][row_lo:row_hi]
-        cm_narrow.block_table_tensor = _get_block_table(kv_cache_gid)   # 不变（per-req）
-        cm_narrow.query_start_loc = torch.tensor([0, n_cone], dtype=int32, dev)
-        cm_narrow.query_start_loc_cpu = ...同上 cpu
-        cm_narrow.seq_lens = <A>  # seq_len 不变（KV 仍读 [0,A)），只收窄 query
-        cm_narrow.num_actual_tokens = n_cone
-        cm_narrow.num_reqs = 1
-        builder = attn_groups[kv_cache_gid][...].get_metadata_builder(0)
-        md_narrow = builder.build(common_prefix_len=..., common_attn_metadata=cm_narrow)
-        for layer_name in kv_cache_group.cone_layer_names(l):  # 该组在层 l 的 prefix
-            staircase_layer_metadata[layer_name] = md_narrow
-forward_context.staircase_layer_metadata = staircase_layer_metadata
+# model, DeepseekV4Model.forward 层循环（已实现）：
+fc = get_forward_context()
+stair_ab = getattr(fc, "staircase_ab", None)
+staircase_active = stair_ab is not None   # runner 唯一激活信号
+if staircase_active:
+    stair_md: dict[str, Any] = {}         # model 自有缓存，lazy 填充
+    b = int(stair_ab[0, 1].item())        # B (num_computed)
+    end = b + hidden_states.shape[0]      # 锥右边界（见"锥右边界"决策）
+    W = self.staircase_window             # 128
+    L_top = self.num_layers_total - 1
+    cur_lo = b                            # 当前 hidden_states 左边界（绝对位置）
+
+for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+    l = self.start_layer + i  # 全局层号
+    if staircase_active:
+        lo = max(b, end - W * (L_top - l + 1))
+        rel = lo - cur_lo              # 本层锥相对当前 hidden_states 左端的偏移（≥0）
+        hs_narrow = hidden_states[rel:]            # 后缀切片（见下"层顺序与切片方向"）
+        pos_narrow = positions[lo - b : end - b]   # positions 全宽，按绝对位置切
+        ids_narrow = input_ids[lo - b : end - b] if input_ids is not None else None
+        if residual is not None: residual = residual[rel:]
+        if post_mix is not None: post_mix = post_mix[rel:]
+        if res_mix is not None: res_mix = res_mix[rel:]
+        # 首次用到时 lazy 收窄该层各 prefix 的 metadata，缓存进 stair_md
+        self._ensure_layer_narrowed(fc, layer, stair_md, lo, end, b, W)
+        saved = self._swap_layer_metadata(fc, layer, stair_md)  # 注入收窄版、保存原引用
+        hidden_states, residual, post_mix, res_mix = layer(
+            hs_narrow, pos_narrow, ids_narrow, post_mix, res_mix, residual,
+        )
+        self._restore_layer_metadata(fc, saved)     # 层后还原（下一层有自己收窄版）
+        cur_lo = lo  # 输出收缩到 [lo, end)
+    else:
+        hidden_states, residual, post_mix, res_mix = layer(
+            hidden_states, positions, input_ids, post_mix, res_mix, residual,
+        )
 ```
+
+`_ensure_layer_narrowed` 对层各 prefix 调 `narrow_metadata(attn_md[prefix], lo, end, b, W)`（
+`staircase.py`），按 metadata 类型分发到四个 narrow 函数：per-token 张量尾切片 `full[lo-b:]`、
+per-request 标量重算。`_swap_layer_metadata`/`_restore_layer_metadata` 只重绑 dict 条目，绝不 mutate
+runner 的共享缓存对象。
 
 **关键设计决策**：
 - **seq_len 不收窄，只收窄 query**：锥内 token 的 SWA/MLA K/V 仍从 cache 读 `[0, seq_len)`（`seq_len`
@@ -398,55 +447,13 @@ forward_context.staircase_layer_metadata = staircase_layer_metadata
   语义一致——全矩形也是 query = 调度 token `[B, end)`，K/V 读 cache。区别只是 query 范围从
   `[B, end)` 缩到 `[lo, end)`。
 - **slot_mapping/block_table 收窄**：锥内 token 的 slot 必须正确指向其 cache 槽（KV 写入用）。连续切片
-  `slot_mapping[row_lo:row_hi]` 保持映射一致（slot 按 token 顺序排）。
+  `slot_mapping[lo-b:]` 保持映射一致（slot 按 token 顺序排）。
 - **query_start_loc 重置为 `[0, n_cone]`**：单请求，n_cone 个 query token。
-- **每层独立 build**：避开缓存复用污染——`md_narrow` 是新对象，不碰 runner 的 `cached_attn_metadata`。
-- **`staircase_layer_metadata` 经 ForwardContext 传到 model**（新字段，仿 `staircase_ab`）。
-
-**model 侧（`DeepseekV4Model.forward` 层循环，`model.py:1077-1085`）**：
-
-```python
-fc = get_forward_context()
-stair_md = getattr(fc, "staircase_layer_metadata", None)  # None 当 flag 关
-a, b = (fc.staircase_ab[0].tolist() if fc.staircase_ab is not None else (None, None))
-W = self.staircase_window
-L_top = self.num_layers_total - 1
-end = b + num_scheduled_tokens  # 锥右边界（见"锥右边界"决策）
-cur_lo = b  # 当前 hidden_states 左边界（绝对位置）；每层后更新为该层 lo
-saved = {}  # 层前保存原 metadata 引用，层后还原
-
-for i, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
-    l = self.start_layer + i  # 全局层号
-    if stair_md is not None:
-        lo = max(b, end - W * (L_top - l + 1))
-        rel = lo - cur_lo              # 本层锥相对当前 hidden_states 左端的偏移（≥0）
-        # hidden_states 当前覆盖 [cur_lo, end)；本层锥 [lo, end) 是其尾部切片（lo ≥ cur_lo）
-        hs_narrow = hidden_states[rel:]
-        # positions/input_ids 保持全宽 [b, end)，按绝对位置切
-        pos_narrow = positions[lo - b : end - b]
-        ids_narrow = input_ids[lo - b : end - b] if input_ids is not None else None
-        # 残差 per-token，覆盖 [cur_lo, end)；本层要 [lo, end) 后缀。首层 residual=None 走 mhc_pre
-        if residual is not None: residual = residual[rel:]
-        if post_mix is not None: post_mix = post_mix[rel:]
-        if res_mix is not None: res_mix = res_mix[rel:]
-        # 替换该层所有 prefix 的 metadata（attn/swa/compressor/indexer/k_cache）
-        for prefix in layer.staircase_prefixes:  # 层拥有的全部 forward_context key
-            if prefix in stair_md:
-                saved[prefix] = fc.attn_metadata[prefix]      # 保存原引用
-                fc.attn_metadata[prefix] = stair_md[prefix]   # 注入收窄版
-        hidden_states, residual, post_mix, res_mix = layer(
-            hs_narrow, pos_narrow, ids_narrow, post_mix, res_mix, residual,
-        )
-        # 还原（避免泄漏到下一层——下一层有自己收窄版）
-        for prefix in saved:
-            fc.attn_metadata[prefix] = saved[prefix]
-        saved.clear()
-        cur_lo = lo  # 输出收缩到 [lo, end)
-    else:
-        hidden_states, residual, post_mix, res_mix = layer(
-            hidden_states, positions, input_ids, post_mix, res_mix, residual,
-        )
-```
+- **切片而非重 build**：避开缓存复用污染——narrow 产出新对象（尾切片 view + 新标量），不碰 runner 的
+  `cached_attn_metadata`；且免去逐层 `build()` 的开销与 triton 重算（见"收窄方式"）。
+- **`stair_md` 是 model 自有 lazy 缓存**（`DeepseekV4Model.forward` 局部空 dict，激活时建、层循环里
+  填）。runner 只传 `staircase_ab` 激活信号——把"怎么收窄某层 metadata"这件深度依赖 model 结构
+  的事留在 model，不上漏到 runner。
 
 > **层顺序与切片方向（承重，2026-07 修正）**：层循环 input→output（层 0 最宽 → 层 L_top 最窄），
 > 与 `islice(self.layers, start, end)` 的自然顺序一致。每层锥 `[lo_l, end)` 是上一层锥
