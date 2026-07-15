@@ -603,17 +603,24 @@ narrowing 路径同时实现了 T4 的残差跨层后缀传递。故 **T4 无独
 T3/T4 的"锥内逐位一致"验证需要跑真实 DSV4 forward，但 DSV4 的 attention/MoE kernel 有硬架构要求：
 
 - **FlashMLA sparse**（DSV4 主 MLA + SWA decode 路径都走它）要求 `capability.major ∈ [9, 10]`
-  （`vllm/v1/attention/backends/mla/flashmla.py:83`）。
-- **MegaMoE** 要求 SM100（`vllm/models/deepseek_v4/nvidia/model.py:303-304`）。
+  （`vllm/v1/attention/backends/mla/flashmla.py:83`）。这是 DSV4 forward 的真实最低门槛。
+- **MegaMoE 不是必须的**：`use_mega_moe` 仅在显式 `moe_backend=="deep_gemm_mega_moe"` 时为真
+  （`nvidia/model.py:523-524`），默认 `moe_backend="auto"` 永不触发。默认走 `Mxfp4MoEMethod`，
+  oracle 按 SM 选 backend（SM90→Marlin/TRITON_UNFUSED，min cap SM80；SM100→DeepGEMM-FP4）。
+  故 **MegaMoE/SM100 从非 E2E 验证门槛** —— SM90（H100）即可跑通 DSV4 forward（FlashMLA SM9 ✓ +
+  mxfp4 Marlin SM80 ✓ + compressor cutedsl SM90 ✓ + o_proj deep_gemm SM90 ✓）。E2E 测试用默认
+  配置，不碰 MegaMoE。
 
-当前开发机是 **NVIDIA T1200 Laptop GPU（SM7.5）** → **无法跑通任何 DSV4 attention 路径**，B 阶段
-（最小 forward 基线）在本机不可行。editable 安装已就绪（`.venv` 直指 `3rdparty/vllm` 源码树），但
-forward 验证须在 **SM90+（H100）或 SM100（B200）** 上进行。本机能做的仅限：import 冒烟、字段/类型
-检查、纯 CPU 逻辑（如锥边界 `lo_L` 计算、`staircase_ab` 构造）。
+当前开发机是 **NVIDIA T1200 Laptop GPU（SM7.5）** → **无法跑通任何 DSV4 forward**（连 bf16 都需
+SM8.0，`cuda.py:625`；attention FlashMLA 需 SM9+；mxfp4 MoE 需 SM80+，三者皆无 CPU/emulation
+fallback）。本机能做的仅限：import 冒烟、字段/类型检查、纯 CPU 逻辑（锥边界 `lo_L` 计算、
+`staircase_ab` 构造、shrinker block-截断对齐）。forward 验证须在 **SM90+（H100 即够，无需 B200）**
+上进行。
 
 ** implication for T3/T4**：收窄逻辑的代码已本机编写 + 静态检查 + CPU 单测（narrow 切片等价、
-cone 边界、残差后缀 hand-off），但"锥内逐位一致"必须留到目标 GPU 机器验证。已写 E2E 测试脚手架
-`tests/v1/attention/test_dsv4_staircase_e2e.py`（`@skipif(not SM90+)`），本机 skip、目标机跑。
+cone 边界、残差后缀 hand-off、shrinker 对齐），但"锥内逐位一致"必须留到目标 GPU 机器验证。已写
+E2E 测试脚手架 `tests/v1/attention/test_dsv4_staircase_e2e.py`（`@skipif(not SM90+)`，本机 skip、
+目标机跑）。
 
 ### 锥内一致性验证（E2E 测试设计，已写）
 
@@ -639,10 +646,19 @@ APC 计算，不是 staircase_ab。
 **已知未验证风险（本机 SM7.5 跑不了 forward，目标机可能需调 1-3 轮）**：
 1. coordinator 访问路径 `engine_core.engine_core.scheduler.kv_cache_manager.coordinator`（inproc 模式，
    `VLLM_ENABLE_V1_MULTIPROCESSING=0`）——静态推断，未实跑。
-2. patch 的 block 对齐假设 `scheduler_block_size // spec.block_size` 为整数（DSV4 各组 block_size 是
-   scheduler_block_size 的因数）——若某组不是因数会截错。
-3. `load_format="random"` + 完整 43 层 DSV4 的显存 / 数值稳定性——未实跑。
+2. ~~patch 的 block 对齐假设 `scheduler_block_size // spec.block_size` 为整数~~ —— **已降级**：
+   shrinker 现对 `B'`/`A'` 断言 `% scheduler_block_size == 0`（fail-closed），且 E2E 测试从
+   `coord.scheduler_block_size` 推导 `B'`/`A'`（不再硬编码 16）。截断数学本身已抽出到
+   `test_dsv4_staircase_shrinker.py` 用 mock coordinator 在 CPU 上验证（6 测试：混合 block_size 截断
+   + 对齐/窗口越界 fail-closed）。
+3. `load_format="random"` + 完整 43 层 DSV4 的显存 / 数值稳定性——未实跑。已加 `seed=0` 保证两次 run
+   随机初始化一致；但 `load_format="random"` 是否按 seed 确定性初始化仍需目标机确认。
 4. logprobs 比较是间接的（锥内逐位一致更严格应比 hidden states）——可能需改用 hidden-states 钩子。
+
+**测试本身的修复（本机已做）**：原 E2E 用 `LLM(..., cache_config={...})` 传 flag，但
+`EngineArgs` 无 `cache_config` 入口（`enable_skip_writeback`/`enable_staircase` 无 CLI/EngineArgs
+surface）——**任何 SM 都会 TypeError**。已改为构造后 mutate `llm.llm_engine.vllm_config.cache_config`
+（inproc 模式下 runner 持同一对象引用、forward 时 live 读取，故 mutation 生效）。
 
 ## 阶段划分
 
@@ -669,22 +685,28 @@ APC 计算，不是 staircase_ab。
 - CPU 单测：`test_dsv4_skip_writeback_gate.py`（builder gate 构造 + mock-kernel dispatch，6 测试）。
 
 **Feature 2（staircase）**：T2-T5 全部落地。
-- T5a flag：`enable_staircase`（`cache.py`），强制 `enable_skip_writeback`。
+- T5a flag：`enable_staircase`（`cache.py`），`model_validator` 强制
+  `enable_skip_writeback=True`（防静默 no-op：staircase 读 `g0_cached_prefix_len`，仅 skip_writeback
+  下 plumbing）。
 - T2：runner `staircase_ab = [[A,B]]`（单请求 prefill + A>B 时）。
 - T3a：model 层循环相对尾切片 narrowing + `_swap/_restore_layer_metadata`（commit `903e87944`）。
 - T3b：`staircase.py` 四个 narrow helper（切片真实 build 输出，无逐层 rebuild / 无 triton）+ model lazy
   收窄接入（commit `fe040f6a2`）。
 - T4：残差跨层后缀切片，代码落在 T3a（无独立代码）。
 - CPU 单测：`test_dsv4_staircase_cone.py`（8 测试，cone 边界 + 层循环 narrowing + 残差 hand-off）、
-  `test_dsv4_staircase_narrow.py`（14 测试，narrow 切片等价 + 闭式标量 + fail-closed）。
-- E2E 测试：`test_dsv4_staircase_e2e.py`（`@skipif(not SM90+)`，本机 skip）。
+  `test_dsv4_staircase_narrow.py`（14 测试，narrow 切片等价 + 闭式标量 + fail-closed）、
+  `test_dsv4_staircase_shrinker.py`（6 测试，E2E hit-shrinker block-截断对齐 + fail-closed）、
+  `test_dsv4_skip_writeback_preempt.py`（2 测试，preempt 后 A 覆盖 invariant）。
+- E2E 测试：`test_dsv4_staircase_e2e.py`（`@skipif(not SM90+)`，本机 skip）。已修复 `cache_config=`
+  传参 bug（改 mutate live config）、B'/A' 改从 `coord.scheduler_block_size` 推导、shrinker 加对齐断言。
 
 ### 遗留问题
 
-1. **【阻塞，本机不可解】E2E 锥内一致性未实跑**：开发机 SM7.5 跑不了 DSV4 forward。需在 SM90+（H100）
-   或 SM100（B200）目标机跑 `test_dsv4_staircase_e2e.py`，确认 flag 开/关锥内 token 逐位一致。测试脚手架
-   已写但 forward 路径未实跑，目标机可能需调 1-3 轮（已知风险见"锥内一致性验证"节：coordinator 访问
-   路径、block 对齐、random-weight 稳定性、logprobs 间接性）。
+1. **【阻塞，本机不可解】E2E 锥内一致性未实跑**：开发机 SM7.5 跑不了 DSV4 forward（bf16 需 SM8.0、
+   attention 需 SM9+、mxfp4 MoE 需 SM80+，无 fallback）。**门槛是 SM90（H100 即够，MegaMoE/SM100 非必须**
+   ——见"硬件验证约束"）。需在 SM90+ 目标机跑 `test_dsv4_staircase_e2e.py`，确认 flag 开/关锥内 token
+   逐位一致。测试脚手架已写但 forward 路径未实跑，目标机可能需调 1-3 轮（已知风险见"锥内一致性验证"
+   节：coordinator 访问路径、random-weight 稳定性、logprobs 间接性；block 对齐已 CPU 降级）。
 2. **【设计限制，非 bug】单请求 prefill only**：staircase 只在 `num_reqs==1 and prefill and A>B` 激活。
    多请求下锥是 per-request、token 轴按请求连续排布，尾切片无对应物——这是正确性前提，narrow helper
    内 `assert` 单请求 fail-closed。多请求 staircase 是另一量级改动，需先解 compressor state-cache 跨层
