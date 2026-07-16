@@ -356,6 +356,23 @@ class SGLangBackend(KVBackend):
         Simplifications vs real SGLang (documented):
         - Reclaims every ``sync_state``; real gates on ``eviction_interval``
           + ``decode_batch_idx >= 1``.  Steady-state bound is identical.
+        - Per-request, post-allocate timing: real SGLang runs
+          ``batch.maybe_evict_swa()`` for ALL requests before any allocation
+          in the step (alloc_for_extend/decode, common.py:471), so request A
+          sees B's just-reclaimed SWA capacity when allocating.  The simulator
+          reclaims inside each request's ``sync_state`` (after that request's
+          allocate), so within step N request A does not see B's step-N
+          reclaim (only B's step-(N-1) reclaim, already applied).  This is a
+          1-step, ~43-slots/req ordering skew — and it cannot be "fixed" by
+          hoisting reclaim to a pre-allocate batch pass: the charged-token
+          cursor is bumped inside ``allocate_slots``, so reclaim MUST run after
+          allocate to see the current step's charged count (a pre-allocate
+          reclaim would use the stale prior-step cursor and under-reclaim).
+          The skew is benign: it is dwarfed by the per-step reclaim frequency
+          (real gates on eviction_interval>1, the simulator reclaims every
+          step), so the simulator's SWA pool runs no fuller than real's on
+          average, and the stall detector backstops the rare high-concurrency
+          + SWA-near-full false-failure case.
         - No ``cache_protected_len`` floor: the charged-token cursor already
           keeps the live window untouched (threshold < charged − window).
           Real SGLang floors ``new_cursor`` at ``cache_protected_len``

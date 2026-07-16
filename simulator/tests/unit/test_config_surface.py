@@ -452,6 +452,18 @@ class TestDeadConfigFieldsRemoved(unittest.TestCase):
             self.assertNotIn("num_tokens", cls.__dict__,
                              f"{cls.__name__} should not define num_tokens")
 
+    def test_sim_request_state_has_no_allocated_blocks(self):
+        # SimRequestState.allocated_blocks was written at prefill and decode
+        # (scheduler.py) but never read anywhere — a dead field.  Pinned gone so
+        # a future "let's stash the allocation here for diagnostics" doesn't
+        # silently resurrect it; the backend handle (backend_req) already owns
+        # backend block state.
+        import dataclasses
+        from simulator.core.request_state import SimRequestState
+
+        names = {f.name for f in dataclasses.fields(SimRequestState)}
+        self.assertNotIn("allocated_blocks", names)
+
 
 if __name__ == "__main__":
     unittest.main()

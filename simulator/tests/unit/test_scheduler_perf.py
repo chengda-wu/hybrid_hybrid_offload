@@ -118,7 +118,6 @@ def _make_state(rid: str, prompt_len: int, out_len: int) -> SimRequestState:
     )
     s.num_computed_tokens = prompt_len  # already prefilled
     s.status = RequestStatus.DECODING
-    s.allocated_blocks = object()
     s.backend_req = _FakeReq(rid)
     return s
 

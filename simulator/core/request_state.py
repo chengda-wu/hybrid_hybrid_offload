@@ -45,7 +45,6 @@ class SimRequestState:
     # ---- Backend handle ----
 
     backend_req: Any | None = None  # vLLMSimRequest | SGLangSimRequest
-    allocated_blocks: Any | None = None  # KVCacheBlocks | torch.Tensor
 
     # ---- Counters for metrics ----
 

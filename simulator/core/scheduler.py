@@ -204,7 +204,6 @@ class SimulatorScheduler:
                 self._prefill_oom_message(req, num_new_tokens, num_computed)
             )
 
-        req.allocated_blocks = allocated
         req.num_computed_tokens = req.num_tokens
         req.num_prefill_tokens = num_new_tokens
 
@@ -320,8 +319,6 @@ class SimulatorScheduler:
             # from the >0 gate (step_latency only added when total_computed>0),
             # but total_loaded is summed unconditionally, so it must be 0 here.
             return 0, 0, 0, 0
-
-        req.allocated_blocks = allocated
 
         # 5. _update_after_schedule: advance by all tokens
         req.advance_computed_tokens(computed)
