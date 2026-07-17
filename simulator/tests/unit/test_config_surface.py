@@ -360,6 +360,57 @@ class TestFromJsonMlaDetection(unittest.TestCase):
         self.assertEqual(arch.kv_lora_rank, 512)
 
 
+class TestFromJsonNumMtpDefault(unittest.TestCase):
+    """from_json must default num_mtp_layers to 0, not 1.
+
+    ``num_nextn_predict_layers`` is DSV4-specific (DSV4 = 1).  A non-DSV4
+    config (e.g. DSV2/V3) lacks the key; pre-fix from_json fell back to 1,
+    which — with spec on — added a phantom MTP SWA layer to the vLLM block
+    pool (vllm_config.py: ``num_mtp_layers = arch.num_mtp_layers if
+    num_spec_tokens > 0 else 0``).  DSV4 configs carry the key explicitly, so
+    they are unaffected by the default.
+    """
+
+    _BASE = {
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 1,
+        "head_dim": 512,
+        "hidden_size": 4096,
+        "qk_rope_head_dim": 64,
+        "q_lora_rank": 1024,
+        "compress_ratios": [0, 0] + [4 if i % 2 == 0 else 128 for i in range(41)],
+        "sliding_window": 128,
+        "torch_dtype": "bfloat16",
+        "vocab_size": 129280,
+        "index_head_dim": 128,
+    }
+
+    def test_omitted_key_defaults_to_zero(self):
+        from simulator.config.model_config import ModelArchitecture
+
+        path = _write_json(dict(self._BASE))  # no num_nextn_predict_layers
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(arch.num_mtp_layers, 0)
+
+    def test_explicit_one_still_parsed(self):
+        # DSV4 carries the key; the default change must not regress DSV4.
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = dict(self._BASE)
+        cfg["num_nextn_predict_layers"] = 1
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(arch.num_mtp_layers, 1)
+
+
 class TestGpuDataPointsCliParsing(unittest.TestCase):
     """--gpu-data-points is a JSON string on the CLI; run.py must json.loads it
     before handing it to GPUPerfConfig.  Pre-fix the raw string was passed
@@ -407,6 +458,41 @@ class TestGpuDataPointsCliParsing(unittest.TestCase):
             )
             model = GPUPerfModel(cfg.gpu_perf)
             self.assertGreater(model.predict(500, 200), 0.0)
+        finally:
+            Path(cfg_path).unlink()
+
+    def test_gpu_data_points_preserves_coeff_overrides(self):
+        # --gpu-data-points must override ONLY data_points, preserving JSON-set
+        # coefficient overrides.  Pre-fix run.py rebuilt GPUPerfConfig, dropping
+        # the coeffs and throwing a coeffs-configured model back into fit mode.
+        # Mirror run.py's new field-level override (cfg.gpu_perf.data_points =
+        # json.loads(...)) and confirm coeffs survive and drive the prediction.
+        import json
+        from simulator.config.simulator_config import SimulatorConfig
+        from simulator.metrics.gpu_perf_model import GPUPerfModel
+
+        cfg_path = _write_json({
+            "gpu_perf": {
+                "loaded_coeff": 0.001,
+                "computed_coeff": 0.01,
+                "interaction_coeff": 0.0,
+                "base_latency_ms": 0.5,
+                "data_points": [[0, 1, 9.0], [1000, 1, 9.0]],
+            },
+        })
+        try:
+            cfg = SimulatorConfig.from_json(cfg_path)
+            # run.py's --gpu-data-points override (field-level, not rebuild):
+            cfg.gpu_perf.data_points = json.loads(
+                "[[0,1,0.5],[1000,1,1.5],[0,500,20.0]]"
+            )
+            # Coeffs preserved → explicit-coeff mode (bypasses fit).
+            self.assertEqual(cfg.gpu_perf.loaded_coeff, 0.001)
+            self.assertEqual(cfg.gpu_perf.base_latency_ms, 0.5)
+            model = GPUPerfModel(cfg.gpu_perf)
+            # a*loaded + b*computed + c*loaded*computed + d
+            expected = 0.001 * 1000 + 0.01 * 1 + 0.0 + 0.5
+            self.assertAlmostEqual(model.predict(1000, 1), expected, places=3)
         finally:
             Path(cfg_path).unlink()
 
@@ -463,6 +549,42 @@ class TestDeadConfigFieldsRemoved(unittest.TestCase):
 
         names = {f.name for f in dataclasses.fields(SimRequestState)}
         self.assertNotIn("allocated_blocks", names)
+
+    def test_sim_request_state_dead_props_removed(self):
+        # is_prefill_needed / is_admitted had no callers anywhere in the
+        # codebase (is_admitted also returned True for FINISHED, a semantic
+        # bug).  is_finished IS used (scheduler.py step loop) and stays.
+        from simulator.core.request_state import SimRequestState
+
+        attrs = dir(SimRequestState)
+        self.assertNotIn("is_prefill_needed", attrs)
+        self.assertNotIn("is_admitted", attrs)
+        self.assertIn("is_finished", attrs)
+
+    def test_kv_backend_config_has_no_kv_cache_dtype(self):
+        # KVBackendConfig.kv_cache_dtype was never read: vLLM derives
+        # cache_dtype_str from arch.is_mla (vllm_config.py:36), SGLang ignores
+        # it, and engine.py never passes it.  Pinned gone.
+        import dataclasses
+        from simulator.config.model_config import KVBackendConfig
+
+        names = {f.name for f in dataclasses.fields(KVBackendConfig)}
+        self.assertNotIn("kv_cache_dtype", names)
+
+    def test_vllm_backend_has_no_bare_block_size_attr(self):
+        # vLLMBackend stored self._block_size in __init__ but never read it
+        # (only _hash_block_size / _scheduler_block_size are read).  The bare
+        # attr is an instance attribute set in __init__, so inspect __init__'s
+        # source to pin its absence (can't observe via __dict__ without
+        # constructing a real vLLMBackend, which needs the vllm package).
+        import inspect
+        from simulator.kv_cache.vllm_backend import vLLMBackend
+
+        src = inspect.getsource(vLLMBackend.__init__)
+        self.assertNotIn("self._block_size = ", src)
+        # The read variants must remain.
+        self.assertIn("self._hash_block_size = ", src)
+        self.assertIn("self._scheduler_block_size = ", src)
 
 
 if __name__ == "__main__":

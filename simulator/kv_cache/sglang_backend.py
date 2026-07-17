@@ -401,11 +401,17 @@ class SGLangBackend(KVBackend):
         """
         charged = sim_req.swa_charged_tokens
         pre_len = charged - 1
-        threshold = pre_len - self._sliding_window - self._page_size
-        if threshold <= 0:
+        evict_threshold = pre_len - self._sliding_window - self._page_size
+        if evict_threshold <= 0:
             return
-        threshold = (threshold // self._page_size) * self._page_size
-        new_cursor = max(sim_req.swa_evicted_charged, threshold)
+        # Match real SGLang (common.py:99-105): max THEN page-align.  The
+        # simulator's swa_evicted_charged is always page-aligned by
+        # construction (only ever set to a page-aligned new_cursor below), so
+        # max-then-align and align-then-max are observationally identical here;
+        # this matches the reference ordering for faithfulness and as a guard
+        # against a future non-page-aligned cursor update path.
+        new_cursor = max(sim_req.swa_evicted_charged, evict_threshold)
+        new_cursor = (new_cursor // self._page_size) * self._page_size
         delta = new_cursor - sim_req.swa_evicted_charged
         if delta > 0:
             self._pool_used[0] = max(

@@ -62,16 +62,8 @@ class SimRequestState:
         return len(self.prompt_token_ids) + len(self.output_token_ids) + len(self.spec_token_ids)
 
     @property
-    def is_prefill_needed(self) -> bool:
-        return self.status == RequestStatus.PRE_FILL
-
-    @property
     def is_finished(self) -> bool:
         return self.status == RequestStatus.FINISHED
-
-    @property
-    def is_admitted(self) -> bool:
-        return self.status not in (RequestStatus.QUEUED, RequestStatus.PRE_FILL)
 
     @property
     def output_length(self) -> int:

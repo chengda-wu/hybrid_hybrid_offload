@@ -18,7 +18,6 @@ from pathlib import Path
 
 from simulator.config.simulator_config import (
     DatasetConfig,
-    GPUPerfConfig,
     SimulatorConfig,
     SpeculativeDecodeConfig,
     SyntheticConfig,
@@ -79,9 +78,11 @@ def main(argv: list[str] | None = None) -> int:
     # --gpu-data-points expects it to override the JSON's gpu_perf.data_points.
     # Default is None (flag omitted) → JSON value (or None) is preserved.
     if args.gpu_data_points is not None:
-        config.gpu_perf = GPUPerfConfig(
-            data_points=json.loads(args.gpu_data_points)
-        )
+        # Override ONLY data_points, preserving any JSON-set coefficient
+        # overrides (loaded_coeff/computed_coeff/interaction_coeff/
+        # base_latency_ms).  Rebuilding GPUPerfConfig here would silently drop
+        # those, throwing a coeffs-configured model back into fit mode.
+        config.gpu_perf.data_points = json.loads(args.gpu_data_points)
 
     engine = SimulationEngine(config)
     report = engine.run()

@@ -196,7 +196,14 @@ class ModelArchitecture:
             vocab_size=cfg.get("vocab_size", 129280),
             use_fp4_indexer=cfg.get("enable_deepseek_v4_fp4_indexer", False),
             indexer_head_dim=cfg.get("index_head_dim", 128),
-            num_mtp_layers=cfg.get("num_nextn_predict_layers", 1),
+            # Default 0: num_nextn_predict_layers is DSV4-specific (DSV4=1).
+            # A non-DSV4 config (e.g. DSV2/V3) lacks the key — falling back to
+            # 1 would add a phantom MTP SWA layer when spec is on
+            # (vllm_config.py: num_mtp_layers applies when num_spec_tokens>0).
+            # deepseek_v4_flash() sets this explicitly to 1, and a real DSV4
+            # config.json carries num_nextn_predict_layers=1, so DSV4 is
+            # unaffected; only non-DSV4 models rely on this default.
+            num_mtp_layers=cfg.get("num_nextn_predict_layers", 0),
         )
 
     @classmethod
@@ -254,7 +261,6 @@ class KVBackendConfig:
     max_model_len: int = 8192
     num_kv_cache_blocks: int = 4096
     scheduler_block_size: int = 16
-    kv_cache_dtype: str = "auto"
     model_version: str = "deepseek_v4"
     num_spec_tokens: int = 0
     # SGLang DSV4 SWA/full token ratio (deepseek_v4_hook.py:57 overrides the

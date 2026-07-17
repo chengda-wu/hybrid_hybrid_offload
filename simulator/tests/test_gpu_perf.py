@@ -67,6 +67,40 @@ class TestGPUExplicitCoefficients(unittest.TestCase):
         expected = 0.001 * 1000 + 0.01 * 1 + 0.5
         self.assertAlmostEqual(t, expected, places=4)
 
+    def test_explicit_coefficients_set_envelope(self):
+        # Explicit-coeff mode must still record a training envelope (from
+        # data_points if provided, else DEFAULT_DATA) so predict()'s
+        # extrapolation warning is not permanently silent.  Pre-fix the coeff
+        # early-return left _max_loaded/_max_computed at 0, and predict()'s
+        # ``> 0`` guard then silenced the warning forever in coeff mode.
+        cfg = GPUPerfConfig(
+            loaded_coeff=0.001,
+            computed_coeff=0.01,
+            interaction_coeff=0.0,
+            base_latency_ms=0.5,
+        )
+        m = GPUPerfModel(cfg)
+        self.assertGreater(m._max_loaded, 0)
+        self.assertGreater(m._max_computed, 0)
+
+    def test_explicit_coefficients_warns_on_extrapolation(self):
+        # With the envelope now recorded, a wildly out-of-range input in coeff
+        # mode must fire the extrapolation warning (pre-fix: permanently silent).
+        cfg = GPUPerfConfig(
+            loaded_coeff=0.001,
+            computed_coeff=0.01,
+            interaction_coeff=0.0,
+            base_latency_ms=0.5,
+        )
+        m = GPUPerfModel(cfg)
+        with self.assertLogs("simulator.metrics.gpu_perf_model", level="WARNING") as cm:
+            # loaded >> 2× DEFAULT_DATA max_loaded (8000).
+            m.predict(10_000_000, 1)
+        self.assertTrue(
+            any("extrapolation" in msg.lower() for msg in cm.output),
+            f"expected extrapolation warning, got: {cm.output}",
+        )
+
 
 class TestGPUCustomDataPoints(unittest.TestCase):
     """Fitting from user-provided data."""

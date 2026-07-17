@@ -38,7 +38,6 @@ class SimulatorScheduler:
         # Queues
         self._waiting: deque[SimRequestState] = deque()
         self._running: dict[str, SimRequestState] = {}
-        self._all: dict[str, SimRequestState] = {}
 
         # State
         self._step: int = 0
@@ -61,7 +60,6 @@ class SimulatorScheduler:
     def load(self, requests: list[SimRequestState]) -> None:
         """Load all requests, sorted by arrival time."""
         for r in sorted(requests, key=lambda r: r.arrival_time):
-            self._all[r.request_id] = r
             self._waiting.append(r)
 
     def step(self) -> bool:

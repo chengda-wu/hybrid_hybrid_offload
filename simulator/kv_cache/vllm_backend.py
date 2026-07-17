@@ -26,7 +26,6 @@ class vLLMBackend(KVBackend):
             init_none_hash,
         )
 
-        self._block_size = backend_config.block_size
         self._hash_block_size = backend_config.hash_block_size
         self._scheduler_block_size = backend_config.scheduler_block_size
 

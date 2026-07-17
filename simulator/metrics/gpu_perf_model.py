@@ -82,6 +82,26 @@ class GPUPerfModel:
 
         Uses Gaussian elimination on the 4×4 normal equations (XᵀX)β = Xᵀy.
         """
+        # Build data points
+        if self._config.data_points:
+            points = [PerfDataPoint(*p) for p in self._config.data_points]
+        else:
+            points = self.DEFAULT_DATA
+
+        # Record the training envelope for extrapolation warning in predict().
+        # Recorded BEFORE the explicit-coefficient early return below so that a
+        # user who supplies coefficients (skipping the fit) still gets an
+        # envelope: from their own data_points if provided, else DEFAULT_DATA
+        # as a rough calibration-range proxy.  Pre-fix the early return left
+        # _max_loaded/_max_computed at 0, and predict()'s ``> 0`` guard then
+        # silenced the extrapolation warning permanently in coeff mode — even
+        # for inputs wildly outside any sane range.  (A user who supplies
+        # coefficients for a known range should also supply data_points to set
+        # an accurate envelope; otherwise DEFAULT_DATA bounds the proxy.)
+        if points:
+            self._max_loaded = max(p.loaded_tokens for p in points)
+            self._max_computed = max(p.computed_tokens for p in points)
+
         # Check for explicit coefficient overrides
         if (
             self._config.loaded_coeff is not None
@@ -95,17 +115,6 @@ class GPUPerfModel:
             self._d = self._config.base_latency_ms
             self._fitted = True
             return
-
-        # Build data points
-        if self._config.data_points:
-            points = [PerfDataPoint(*p) for p in self._config.data_points]
-        else:
-            points = self.DEFAULT_DATA
-
-        # Record the training envelope for extrapolation warning in predict().
-        if points:
-            self._max_loaded = max(p.loaded_tokens for p in points)
-            self._max_computed = max(p.computed_tokens for p in points)
 
         n = len(points)
         if n == 0:

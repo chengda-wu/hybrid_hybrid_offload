@@ -160,5 +160,30 @@ class TestFailedDecodeExcludedFromPerfModel(unittest.TestCase):
                         f"max_loaded={max_loaded}, calls={perf.calls}")
 
 
+class TestAllDictRemoved(unittest.TestCase):
+    """The ``_all`` dict (scheduler.py) was written in ``load()`` but never
+    read — dead state that retained every SimRequestState for the whole run
+    (unbounded growth).  Pinned gone so a future "let's track all requests
+    here" doesn't silently resurrect a retention dict.  ``_running`` (consumed
+    by the step loop) stays.
+    """
+
+    def test_scheduler_has_no_all_dict(self):
+        backend = _FailDecodeBackend(fail_req="x", prompt_len=10)
+        config = SimulatorConfig(
+            speculative=SpeculativeDecodeConfig(enabled=False, num_spec_tokens=0),
+            warmup_steps=0, stall_limit=50,
+        )
+        sched = SimulatorScheduler(
+            config=config, kv_backend=backend,
+            acceptance_model=AcceptanceModel(config.speculative, seed=0),
+            gpu_perf_model=_CapturingPerfModel(), recorder=MetricsRecorder(),
+        )
+        self.assertFalse(hasattr(sched, "_all"),
+                         "scheduler should not retain a dead _all dict")
+        # _running is the live structure and must still exist.
+        self.assertTrue(hasattr(sched, "_running"))
+
+
 if __name__ == "__main__":
     unittest.main()
