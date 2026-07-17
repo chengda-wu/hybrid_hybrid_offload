@@ -411,6 +411,60 @@ class TestFromJsonNumMtpDefault(unittest.TestCase):
         self.assertEqual(arch.num_mtp_layers, 1)
 
 
+class TestFromJsonEdgeCases(unittest.TestCase):
+    """from_json robustness on malformed/edge configs."""
+
+    _BASE = {
+        "model_type": "deepseek_v4",
+        "num_hidden_layers": 43,
+        "num_attention_heads": 64,
+        "num_key_value_heads": 1,
+        "head_dim": 512,
+        "hidden_size": 4096,
+        "qk_rope_head_dim": 64,
+        "q_lora_rank": 1024,
+        "compress_ratios": [0, 0] + [4 if i % 2 == 0 else 128 for i in range(41)],
+        "sliding_window": 128,
+        "torch_dtype": "bfloat16",
+        "vocab_size": 129280,
+        "index_head_dim": 128,
+    }
+
+    def test_empty_architectures_no_model_type_no_crash(self):
+        # ``cfg.get("architectures", ["unknown"])[0]`` would IndexError when
+        # architectures is an empty list (key present → default unused).  The
+        # guard must fall back to "unknown" instead of crashing.
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = dict(self._BASE)
+        del cfg["model_type"]
+        cfg["architectures"] = []
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(arch.model_type, "unknown")
+
+    def test_kv_lora_rank_zero_not_treated_as_falsy(self):
+        # ``or`` coalescing would treat kv_lora_rank=0 as falsy and fall
+        # through to q_lora_rank.  ``is not None`` keeps 0.  (The value is
+        # only an MLA sentinel, so 0 still sets is_mla=True via the qk_rope
+        # pair — but the stored field must reflect the real key.)
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = dict(self._BASE)
+        cfg.pop("q_lora_rank", None)
+        cfg["kv_lora_rank"] = 0
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(arch.kv_lora_rank, 0)
+        self.assertTrue(arch.is_mla)
+
+
 class TestGpuDataPointsCliParsing(unittest.TestCase):
     """--gpu-data-points is a JSON string on the CLI; run.py must json.loads it
     before handing it to GPUPerfConfig.  Pre-fix the raw string was passed

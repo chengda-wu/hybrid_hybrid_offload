@@ -168,6 +168,33 @@ class TestSchedulerE2E(unittest.TestCase):
                     engine = SimulationEngine(cfg)
                     engine.run()
 
+    # ---- vLLM usage matches real vLLM BlockPool.get_usage() ----
+
+    @requires_vllm
+    def test_vllm_usage_matches_real_block_pool_get_usage(self):
+        # The simulator's ``usage`` must equal real vLLM's
+        # ``BlockPool.get_usage()`` (the oracle), which divides by
+        # ``num_gpu_blocks - 1`` (excluding the null block).  Pre-fix the
+        # simulator divided by ``num_blocks`` (including the null block),
+        # under-counting usage by ~1 block.  Drive one partial allocation so
+        # the pool is non-empty (at empty both formulas give 0.0 and can't
+        # distinguish), then compare against the real oracle.
+        engine = SimulationEngine(_config("vllm", num_spec_tokens=0))
+        backend = engine._backend
+        prompt = list(range(256))
+        sim_req = backend.create_request("u0", prompt, max_tokens=64)
+        backend.register_request(sim_req)
+        blocks, computed = backend.get_computed_blocks(sim_req)
+        allocated = backend.allocate_slots(
+            sim_req, num_new_tokens=len(prompt),
+            num_new_computed_tokens=computed, new_computed_blocks=blocks,
+        )
+        self.assertIsNotNone(allocated, "prefill allocation must succeed")
+        # Partial state: some blocks used, pool not empty.
+        self.assertLess(backend.num_free_blocks, backend.total_blocks)
+        oracle = backend._manager.block_pool.get_usage()
+        self.assertAlmostEqual(backend.usage, oracle, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

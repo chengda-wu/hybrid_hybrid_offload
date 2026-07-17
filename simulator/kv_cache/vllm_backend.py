@@ -148,8 +148,14 @@ class vLLMBackend(KVBackend):
 
     @property
     def usage(self) -> float:
+        # Match real vLLM BlockPool.get_usage(): the denominator excludes the
+        # reserved null block (num_gpu_blocks - 1), and get_num_free_blocks()
+        # already excludes it too (the null block is popped from the free queue
+        # at init).  total_blocks (== kv_cache_config.num_blocks) includes the
+        # null block, so subtract 1 here.  Off-by-one vs real vLLM otherwise
+        # (~0.03% at N=4096, ~1% at N=10).
         num_free = self.num_free_blocks
-        total = self.total_blocks
+        total = self.total_blocks - 1  # exclude null block (block_pool.py:700)
         return 1.0 - (num_free / total) if total > 0 else 0.0
 
     @property

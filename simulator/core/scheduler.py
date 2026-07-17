@@ -90,7 +90,10 @@ class SimulatorScheduler:
             elif req.status == RequestStatus.DECODING:
                 loaded, computed, accepted, generated = self._handle_decode(req)
             else:
-                loaded = computed = accepted = generated = 0
+                # Unreachable: FINISHED is skipped above, QUEUED requests live
+                # in _waiting (not _running).  Assert so a future status added
+                # to _running surfaces loudly instead of silently zeroing.
+                assert False, f"unexpected status {req.status} for {req.request_id}"
 
             total_loaded += loaded
             total_computed += computed

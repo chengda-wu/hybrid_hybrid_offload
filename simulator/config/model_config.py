@@ -134,8 +134,11 @@ class ModelArchitecture:
         if c4_count:
             groups.append(("c4_indexer", 256, 4, c4_count))
 
-        if not groups:
-            groups.append(("full", 256, 1, self.num_layers))
+        # Unreachable: the SWA group (step 1) is appended unconditionally for
+        # MLA models, and non-MLA models return early above.  Assert so a
+        # future change that makes the SWA append conditional surfaces an
+        # empty-groups bug loudly.
+        assert groups, "layer_groups must not be empty for an MLA model"
         return groups
 
     @classmethod
@@ -144,7 +147,14 @@ class ModelArchitecture:
         with open(path) as f:
             cfg = json.load(f)
 
-        model_type = cfg.get("model_type", cfg.get("architectures", ["unknown"])[0])
+        # ``cfg.get("architectures", ["unknown"])[0]`` would IndexError on an
+        # empty architectures list (key present, default not used); guard with
+        # ``or`` so a missing model_type falls back to the first architecture
+        # or "unknown".
+        model_type = (
+            cfg.get("model_type")
+            or (cfg.get("architectures") or ["unknown"])[0]
+        )
 
         # Head size detection
         head_size = cfg.get("head_dim", 0)
@@ -164,7 +174,12 @@ class ModelArchitecture:
         # hybrid layer_groups collapsed to a single "full" group).  Accept
         # either key; the value is only used as a non-None MLA sentinel (it
         # never enters the per-token byte math).
-        kv_lora_rank = cfg.get("kv_lora_rank") or cfg.get("q_lora_rank")
+        # ``or`` would treat a legitimate kv_lora_rank=0 as falsy and fall
+        # through to q_lora_rank; use ``is not None`` null-coalescing.  (The
+        # value is only an MLA sentinel — it never enters byte math — so a 0
+        # has no real-world impact, but the coalescing is still more correct.)
+        kv = cfg.get("kv_lora_rank")
+        kv_lora_rank = kv if kv is not None else cfg.get("q_lora_rank")
         qk_rope_head_dim = cfg.get("qk_rope_head_dim")
 
         # Per-layer compress ratios (DeepSeek V4); keep the full list
