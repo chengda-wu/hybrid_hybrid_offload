@@ -363,7 +363,6 @@ class SimulatorScheduler:
         # 10. Check stop
         if req.output_length >= req.max_output_tokens:
             req.status = RequestStatus.FINISHED
-            req.finish_time = self._sim_time
 
         if self._verbose:
             print(

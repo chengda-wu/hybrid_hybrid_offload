@@ -148,7 +148,6 @@ class SimulatorConfig:
     # evict-wait stalls.  See scheduler._check_stall.
     stall_limit: int = 1000
     random_seed: int = 42
-    output_dir: str | None = None
     verbose: bool = False
 
     @classmethod
@@ -237,6 +236,5 @@ class SimulatorConfig:
             warmup_steps=data.get("warmup_steps", 10),
             stall_limit=data.get("stall_limit", 1000),
             random_seed=data.get("random_seed", 42),
-            output_dir=data.get("output_dir"),
             verbose=data.get("verbose", False),
         )

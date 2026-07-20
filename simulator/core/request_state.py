@@ -40,7 +40,6 @@ class SimRequestState:
 
     arrival_time: float = 0.0               # sim time when request arrived
     first_token_time: float | None = None   # TTFT timestamp (ms)
-    finish_time: float | None = None        # when FINISHED
 
     # ---- Backend handle ----
 

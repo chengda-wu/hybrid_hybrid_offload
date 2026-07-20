@@ -63,8 +63,15 @@ class ModelArchitecture:
     def __post_init__(self) -> None:
         if self.kv_lora_rank is not None and self.qk_rope_head_dim is not None:
             self.is_mla = True
-        if self.compress_ratios is None:
-            self.compress_ratios = [self.compress_ratio] * self.num_layers
+        # NOTE: compress_ratios is NOT filled here when None.  A non-DSV4 MLA
+        # config (e.g. DSV2/V3) has kv_lora_rank but no compress_ratios —
+        # filling [compress_ratio]*N (= [1]*N) would set is_mla=True yet
+        # layer_groups would produce only an SWA group (no c4/c128/main MLA),
+        # a contradictory hybrid layout.  Leaving it None lets layer_groups /
+        # build_kv_cache_groups / engine all take the uniform "full" fallback
+        # (they guard on ``compress_ratios is None``), which is the safe
+        # behavior for an unsupported non-DSV4 model.  All readers also use
+        # ``compress_ratios or []`` so None is handled everywhere.
 
     @property
     def kv_bytes_per_token(self) -> int:
@@ -76,7 +83,12 @@ class ModelArchitecture:
         512 + 64 + 8 = 584.  Deriving (not hardcoding 584) keeps the cost
         correct for any future MLA model with a different RoPE head dim.
         """
-        qk_rope = self.qk_rope_head_dim or 64
+        # ``is not None`` (not ``or``) so a hypothetical qk_rope_head_dim=0 is
+        # respected rather than falling back to 64.  In practice this property
+        # is only called on the MLA path, where __post_init__ guarantees
+        # qk_rope_head_dim is not None, so the fallback never fires — but the
+        # null-coalescing matches the kv_lora_rank handling below.
+        qk_rope = self.qk_rope_head_dim if self.qk_rope_head_dim is not None else 64
         return self.head_size + qk_rope + 8
 
     @property
@@ -161,7 +173,10 @@ class ModelArchitecture:
         if not head_size:
             nope = cfg.get("qk_nope_head_dim", 0)
             rope = cfg.get("qk_rope_head_dim", 0)
-            if nope and rope:
+            # ``or`` (not ``and``): a config with qk_nope_head_dim but a
+            # missing/zero qk_rope_head_dim should still use nope (+0) rather
+            # than falling through to hidden_size//num_attention_heads.
+            if nope or rope:
                 head_size = nope + rope
         if not head_size:
             head_size = cfg.get("hidden_size", 4096) // cfg.get(

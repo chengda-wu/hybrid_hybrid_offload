@@ -464,6 +464,59 @@ class TestFromJsonEdgeCases(unittest.TestCase):
         self.assertEqual(arch.kv_lora_rank, 0)
         self.assertTrue(arch.is_mla)
 
+    def test_qk_rope_head_dim_zero_respected(self):
+        # kv_bytes_per_token must use qk_rope_head_dim=0 (not fall back to 64)
+        # when explicitly set.  ``or 64`` would have treated 0 as falsy.
+        # Constructed directly (not via from_json) so head_size/qk_rope are
+        # exactly as given; is_mla forces the MLA path that calls the property.
+        from simulator.config.model_config import ModelArchitecture
+
+        arch = ModelArchitecture(
+            model_type="test", num_layers=4, num_kv_heads=1,
+            num_attention_heads=1, head_size=512, max_position_embeddings=4096,
+            hidden_size=4096, kv_lora_rank=512, qk_rope_head_dim=0,
+            compress_ratios=[4, 4, 4, 4],
+        )
+        # head_size + qk_rope(0) + 8 = 520, NOT 512 + 64 + 8 = 584.
+        self.assertEqual(arch.kv_bytes_per_token, 512 + 0 + 8)
+
+    def test_head_size_from_nope_without_rope(self):
+        # A config with qk_nope_head_dim but no qk_rope_head_dim must derive
+        # head_size = nope (+0), not fall through to hidden_size//num_heads.
+        # ``and`` would have required both; ``or`` accepts either.
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = dict(self._BASE)
+        del cfg["head_dim"]
+        cfg["qk_nope_head_dim"] = 448
+        cfg.pop("qk_rope_head_dim", None)
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertEqual(arch.head_size, 448)
+
+    def test_non_dsv4_mla_without_compress_ratios_falls_back_to_full(self):
+        # A non-DSV4 MLA config (kv_lora_rank set, no compress_ratios) must NOT
+        # produce a contradictory SWA-only hybrid layout.  Pre-fix __post_init__
+        # filled compress_ratios=[1]*N → layer_groups=[("swa",...)] only, with
+        # is_mla=True but no main MLA group.  Post-fix compress_ratios stays
+        # None → layer_groups returns the uniform "full" group (safe fallback).
+        from simulator.config.model_config import ModelArchitecture
+
+        cfg = dict(self._BASE)
+        del cfg["compress_ratios"]
+        path = _write_json(cfg)
+        try:
+            arch = ModelArchitecture.from_json(path)
+        finally:
+            Path(path).unlink()
+        self.assertIsNone(arch.compress_ratios)
+        self.assertTrue(arch.is_mla)  # kv_lora_rank/qk_rope still set
+        # Uniform fallback, not a contradictory SWA-only hybrid.
+        self.assertEqual(arch.layer_groups, [("full", 0, 1, arch.num_layers)])
+
 
 class TestGpuDataPointsCliParsing(unittest.TestCase):
     """--gpu-data-points is a JSON string on the CLI; run.py must json.loads it
@@ -639,6 +692,32 @@ class TestDeadConfigFieldsRemoved(unittest.TestCase):
         # The read variants must remain.
         self.assertIn("self._hash_block_size = ", src)
         self.assertIn("self._scheduler_block_size = ", src)
+
+    def test_simulator_config_has_no_output_dir(self):
+        # output_dir was parsed from JSON but never read — the CLI writes
+        # reports via --output/-o (args.output), unrelated to this field.
+        import dataclasses
+        from simulator.config.simulator_config import SimulatorConfig
+
+        names = {f.name for f in dataclasses.fields(SimulatorConfig)}
+        self.assertNotIn("output_dir", names)
+
+    def test_from_json_tolerates_stray_output_dir(self):
+        path = _write_json({"output_dir": "/tmp/x"})
+        try:
+            cfg = SimulatorConfig.from_json(path)
+            self.assertFalse(hasattr(cfg, "output_dir"))
+        finally:
+            Path(path).unlink()
+
+    def test_sim_request_state_has_no_finish_time(self):
+        # finish_time was set at decode completion (scheduler.py) but never
+        # read — the recorder computes total_latency_ms = sim_time - arrival.
+        import dataclasses
+        from simulator.core.request_state import SimRequestState
+
+        names = {f.name for f in dataclasses.fields(SimRequestState)}
+        self.assertNotIn("finish_time", names)
 
 
 if __name__ == "__main__":
