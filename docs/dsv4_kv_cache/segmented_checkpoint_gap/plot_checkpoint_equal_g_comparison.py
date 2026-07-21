@@ -176,53 +176,6 @@ def best_under(frontier: np.ndarray, storage_limit: float) -> np.ndarray:
     return ordered[index]
 
 
-def build_comparison_curve(
-    unrestricted: np.ndarray,
-    equal_frontier: np.ndarray,
-) -> np.ndarray:
-    unrestricted = unrestricted[np.argsort(unrestricted[:, 0])]
-    rows: list[list[float]] = []
-    for point in unrestricted:
-        try:
-            equal = best_under(equal_frontier, float(point[0]))
-        except ValueError:
-            continue
-        penalty = (equal[1] / point[1] - 1.0) * 100.0
-        rows.append(
-            [
-                float(point[0]),
-                float(penalty),
-                float(equal[2]),
-                float(point[2]),
-                float(point[3]),
-                float(point[4]),
-                float(equal[1]),
-                float(point[1]),
-            ]
-        )
-    return np.asarray(rows, dtype=np.float64)
-
-
-def downsample_extrema(points: np.ndarray, bins: int) -> np.ndarray:
-    if points.shape[0] <= bins * 4:
-        return points
-    logs = np.log10(points[:, 0])
-    edges = np.linspace(float(logs.min()), float(logs.max()), bins + 1)
-    selected: set[int] = {0, points.shape[0] - 1}
-    for low, high in zip(edges[:-1], edges[1:], strict=True):
-        indices = np.flatnonzero((logs >= low) & (logs <= high))
-        if indices.size:
-            selected.update(
-                (
-                    int(indices[0]),
-                    int(indices[-1]),
-                    int(indices[np.argmin(points[indices, 1])]),
-                    int(indices[np.argmax(points[indices, 1])]),
-                )
-            )
-    return points[sorted(selected)]
-
-
 def write_equal_frontier_csv(
     path: Path,
     frontier: np.ndarray,
@@ -305,46 +258,31 @@ def build_representative_comparison(
     return rows
 
 
-def comparison_fragment(curve: np.ndarray, representatives: list[dict[str, int | float]]) -> str:
-    curve_rows = [
-        [
-            round(float(row[0]), 8),
-            round(float(row[1]), 6),
-            int(row[2]),
-            int(row[3]),
-            int(row[4]),
-            int(row[5]),
-            round(float(row[6]), 6),
-            round(float(row[7]), 6),
-        ]
-        for row in curve
-    ]
+def comparison_fragment(representatives: list[dict[str, int | float]]) -> str:
     representative_rows = [
         [
-            round(float(row["comparison_storage_cap_gib"]), 8),
-            round(float(row["sampled_penalty_percent"]), 6),
-            int(row["equal_sampled_g"]),
+            float(row["nominal_storage_limit_gib"]),
+            round(float(row["exact_penalty_percent"]), 6),
+            int(row["equal_exact_g"]),
             int(row["dual_g1"]),
             int(row["dual_g2"]),
             int(row["dual_l"]),
-            round(float(row["equal_sampled_recovery"]), 6),
-            round(float(row["dual_sampled_recovery"]), 6),
-            float(row["nominal_storage_limit_gib"]),
+            round(float(row["equal_exact_recovery"]), 6),
+            round(float(row["dual_exact_recovery"]), 6),
+            round(float(row["comparison_storage_cap_gib"]), 8),
         ]
         for row in representatives
     ]
-    curve_json = json.dumps(curve_rows, separators=(",", ":"))
     representatives_json = json.dumps(representative_rows, separators=(",", ":"))
     return f"""{VIS_START}
 <div id="dsv4-equal-gap-comparison" class="viz-root">
-  <h2 class="dsv4-chart-title">同 gap 对照：相对恢复量差异（g₁ = g₂）</h2>
+  <h2 class="dsv4-chart-title">不同 gap 的精确收益：强制同 gap 后的恢复量增幅</h2>
   <div class="viz-row text-muted text-small" aria-live="polite">
-    <span>同一存储上限下，强制 g₁=g₂ 相对双 g 前沿</span>
-    <span>● 代表预算</span>
+    <span>完整 workload 精确均值 · 正值表示 g₁≠g₂ 更好</span>
     <span id="dsv4-equal-selected"></span>
   </div>
   <div class="dsv4-equal-plot" id="dsv4-equal-plot">
-    <canvas id="dsv4-equal-canvas" role="img" aria-label="强制 g1 等于 g2 时，相对双 gap Pareto 前沿的平均恢复计算量百分比差异；负值表示同 g 更好"></canvas>
+    <canvas id="dsv4-equal-canvas" role="img" aria-label="九个代表预算上，强制 g1 等于 g2 后的完整 workload 平均恢复计算量增幅；正值表示不同 gap 更好"></canvas>
     <div class="tooltip" id="dsv4-equal-tooltip"></div>
   </div>
 </div>
@@ -360,8 +298,7 @@ def comparison_fragment(curve: np.ndarray, representatives: list[dict[str, int |
 <script>
 (() => {{
   const root = document.getElementById('dsv4-equal-gap-comparison');
-  const CURVE = {curve_json};
-  const REPS = {representatives_json};
+  const DATA = {representatives_json};
   const canvas = root.querySelector('#dsv4-equal-canvas');
   const plot = root.querySelector('#dsv4-equal-plot');
   const tip = root.querySelector('#dsv4-equal-tooltip');
@@ -373,14 +310,9 @@ def comparison_fragment(curve: np.ndarray, representatives: list[dict[str, int |
   root.appendChild(colorProbe);
   const color = name => {{ colorProbe.style.color = `var(${{name}})`; return getComputedStyle(colorProbe).color; }};
   const format = (value, digits = 2) => value.toLocaleString('zh-CN', {{ maximumFractionDigits: digits }});
-  const xLogs = CURVE.map(point => Math.log10(point[0]));
-  const xMin = Math.min(...xLogs), xMax = Math.max(...xLogs);
-  const rawY = CURVE.map(point => point[1]).concat(REPS.map(point => point[1]), [0]);
-  const rawMin = Math.min(...rawY), rawMax = Math.max(...rawY);
-  const rawSpan = Math.max(rawMax - rawMin, 0.02);
-  const yMin = rawMin - rawSpan * 0.1, yMax = rawMax + rawSpan * 0.1;
-  let screen = [], repScreen = [], geometry = null, selected = Math.min(3, REPS.length - 1), hoverFrame = 0;
-  const pointText = point => `存储≤${{format(point[0], 4)}} GiB：同 g=${{point[2]}}，双 g=${{point[3]}}/${{point[4]}}（l=${{point[5]}}），恢复量差异 ${{point[1] >= 0 ? '+' : ''}}${{format(point[1], 3)}}%`;
+  const rawMax = Math.max(...DATA.map(point => point[1]), 1);
+  let bars = [], selected = Math.min(3, DATA.length - 1), hoverFrame = 0;
+  const pointText = point => `预算 ${{format(point[0], 0)}} GiB（实际存储≤${{format(point[8], 3)}} GiB）：双 gap=${{point[3]}}/${{point[4]}}（l=${{point[5]}}），同 gap=${{point[2]}}；强制同 gap 后恢复量 +${{format(point[1], 3)}}%`;
   const niceStep = span => {{
     const raw = span / 5, power = 10 ** Math.floor(Math.log10(raw)), scaled = raw / power;
     return (scaled <= 1 ? 1 : scaled <= 2 ? 2 : scaled <= 5 ? 5 : 10) * power;
@@ -389,48 +321,51 @@ def comparison_fragment(curve: np.ndarray, representatives: list[dict[str, int |
     const width = Math.max(320, plot.clientWidth), height = width < 600 ? 360 : 430, ratio = window.devicePixelRatio || 1;
     canvas.style.height = `${{height}}px`; canvas.width = Math.round(width * ratio); canvas.height = Math.round(height * ratio);
     ctx.setTransform(ratio, 0, 0, ratio, 0, 0); ctx.clearRect(0, 0, width, height);
-    const margin = {{ left: width < 600 ? 62 : 82, right: 18, top: 18, bottom: 60 }};
+    const margin = {{ left: width < 600 ? 58 : 74, right: 14, top: 30, bottom: 58 }};
     const innerWidth = width - margin.left - margin.right, innerHeight = height - margin.top - margin.bottom;
-    const scaleX = value => margin.left + (Math.log10(value) - xMin) / (xMax - xMin) * innerWidth;
-    const scaleY = value => margin.top + innerHeight - (value - yMin) / (yMax - yMin) * innerHeight;
-    geometry = {{ scaleX, scaleY }};
+    const band = innerWidth / DATA.length, barWidth = Math.min(42, band * 0.58);
+    const step = niceStep(rawMax), plotMax = Math.ceil(rawMax * 1.12 / step) * step;
+    const scaleY = value => margin.top + innerHeight - value / plotMax * innerHeight;
     const foreground = color('--foreground'), muted = color('--muted-foreground'), grid = color('--border');
-    const lineColor = color('--viz-series-1'), repColor = color('--viz-series-2'), background = color('--background');
+    const barColor = color('--viz-series-1'), selectedColor = color('--viz-series-2'), background = color('--background');
     ctx.font = getComputedStyle(root).font; ctx.fillStyle = muted; ctx.strokeStyle = grid; ctx.lineWidth = 1;
-    for (let exponent = Math.floor(xMin); exponent <= Math.ceil(xMax); exponent++) for (const multiplier of [1, 2, 5]) {{
-      const value = multiplier * 10 ** exponent, logValue = Math.log10(value); if (logValue < xMin || logValue > xMax) continue;
-      const x = scaleX(value), major = multiplier === 1; ctx.globalAlpha = major ? 0.55 : 0.22; ctx.beginPath(); ctx.moveTo(x, margin.top); ctx.lineTo(x, margin.top + innerHeight); ctx.stroke();
-      if (major) {{ ctx.globalAlpha = 1; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(format(value, value < 10 ? 1 : 0), x, margin.top + innerHeight + 8); }}
-    }}
-    const step = niceStep(yMax - yMin), firstTick = Math.ceil(yMin / step) * step;
-    for (let value = firstTick; value <= yMax + step * 0.1; value += step) {{
-      const y = scaleY(value); ctx.globalAlpha = Math.abs(value) < step * 1e-6 ? 0.9 : 0.35; ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + innerWidth, y); ctx.stroke();
+    for (let value = 0; value <= plotMax + step * 0.1; value += step) {{
+      const y = scaleY(value); ctx.globalAlpha = value === 0 ? 0.8 : 0.35; ctx.beginPath(); ctx.moveTo(margin.left, y); ctx.lineTo(margin.left + innerWidth, y); ctx.stroke();
       ctx.globalAlpha = 1; ctx.textAlign = 'right'; ctx.textBaseline = 'middle'; ctx.fillText(`${{format(value, 2)}}%`, margin.left - 8, y);
     }}
-    ctx.globalAlpha = 1; ctx.fillStyle = foreground; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
-    ctx.fillText('平均 DRAM checkpoint 存储上限（GiB，对数）', margin.left + innerWidth / 2, height - 4);
-    ctx.save(); ctx.translate(16, margin.top + innerHeight / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('同 g 恢复量差异（%，负值更好）', 0, 0); ctx.restore();
-    screen = CURVE.map(point => [scaleX(point[0]), scaleY(point[1])]);
-    ctx.strokeStyle = lineColor; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.9; ctx.beginPath();
-    screen.forEach(([x, y], index) => index ? ctx.lineTo(x, y) : ctx.moveTo(x, y)); ctx.stroke();
-    repScreen = REPS.map(point => [scaleX(point[0]), scaleY(point[1])]); ctx.fillStyle = repColor; ctx.globalAlpha = 1;
-    repScreen.forEach(([x, y]) => {{ ctx.beginPath(); ctx.arc(x, y, 3.5, 0, Math.PI * 2); ctx.fill(); }});
-    if (selected >= 0) {{ const [x, y] = repScreen[selected]; ctx.fillStyle = background; ctx.strokeStyle = repColor; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.arc(x, y, 6.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); selectedInfo.textContent = `· 当前：${{pointText(REPS[selected])}}`; }}
+    bars = DATA.map((point, index) => {{
+      const x = margin.left + (index + 0.5) * band, top = scaleY(point[1]), bottom = scaleY(0), barHeight = bottom - top;
+      ctx.globalAlpha = 0.9; ctx.fillStyle = barColor;
+      if (barHeight > 0.5) ctx.fillRect(x - barWidth / 2, top, barWidth, barHeight);
+      else {{ ctx.beginPath(); ctx.arc(x, bottom, 3, 0, Math.PI * 2); ctx.fill(); }}
+      ctx.globalAlpha = 1; ctx.fillStyle = foreground; ctx.textAlign = 'center'; ctx.textBaseline = 'top'; ctx.fillText(format(point[0], 0), x, bottom + 9);
+      if (width >= 600) {{ ctx.textBaseline = 'bottom'; ctx.fillText(`${{format(point[1], point[1] >= 10 ? 2 : 3)}}%`, x, top - 6); }}
+      return {{ x, top, bottom, width: barWidth }};
+    }});
+    ctx.fillStyle = foreground; ctx.textAlign = 'center'; ctx.textBaseline = 'bottom'; ctx.fillText('名义存储预算（GiB）', margin.left + innerWidth / 2, height - 3);
+    ctx.save(); ctx.translate(15, margin.top + innerHeight / 2); ctx.rotate(-Math.PI / 2); ctx.fillText('强制同 gap 后的恢复量增幅（%）', 0, 0); ctx.restore();
+    if (selected >= 0) {{
+      const bar = bars[selected], point = DATA[selected]; ctx.strokeStyle = selectedColor; ctx.lineWidth = 2.5; ctx.fillStyle = background;
+      if (point[1] > 0) ctx.strokeRect(bar.x - bar.width / 2 - 2, bar.top - 2, bar.width + 4, bar.bottom - bar.top + 4);
+      else {{ ctx.beginPath(); ctx.arc(bar.x, bar.bottom, 6, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }}
+      selectedInfo.textContent = `· 当前：${{pointText(point)}}`;
+    }}
   }}
   function nearest(clientX, clientY) {{
-    if (!geometry) return null; const rect = canvas.getBoundingClientRect(), x = clientX - rect.left, y = clientY - rect.top;
-    let best = 144, result = null;
-    repScreen.forEach((point, index) => {{ const dx = point[0] - x, dy = point[1] - y, distance = dx * dx + dy * dy; if (distance < best) {{ best = distance; result = {{ kind: 'rep', index, x, y }}; }} }});
-    screen.forEach((point, index) => {{ const dx = point[0] - x, dy = point[1] - y, distance = dx * dx + dy * dy; if (distance < best) {{ best = distance; result = {{ kind: 'curve', index, x, y }}; }} }});
+    const rect = canvas.getBoundingClientRect(), x = clientX - rect.left, y = clientY - rect.top; let best = 196, result = null;
+    bars.forEach((bar, index) => {{
+      if (x >= bar.x - bar.width / 2 - 4 && x <= bar.x + bar.width / 2 + 4 && y >= bar.top - 8 && y <= bar.bottom + 8) {{ result = {{ index, x, y }}; best = -1; return; }}
+      if (best < 0) return; const dx = bar.x - x, dy = bar.top - y, distance = dx * dx + dy * dy; if (distance < best) {{ best = distance; result = {{ index, x, y }}; }}
+    }});
     return result;
   }}
   canvas.addEventListener('pointermove', event => {{ cancelAnimationFrame(hoverFrame); hoverFrame = requestAnimationFrame(() => {{
-    const hit = nearest(event.clientX, event.clientY); if (!hit) {{ tip.style.display = 'none'; return; }} const point = hit.kind === 'rep' ? REPS[hit.index] : CURVE[hit.index];
+    const hit = nearest(event.clientX, event.clientY); if (!hit) {{ tip.style.display = 'none'; return; }} const point = DATA[hit.index];
     tip.textContent = pointText(point); tip.style.display = 'block'; const tipWidth = tip.offsetWidth, tipHeight = tip.offsetHeight;
     tip.style.left = `${{Math.max(0, Math.min(plot.clientWidth - tipWidth, hit.x + 12))}}px`; tip.style.top = `${{Math.max(0, hit.y - tipHeight - 10)}}px`;
   }}); }});
   canvas.addEventListener('pointerleave', () => {{ tip.style.display = 'none'; }});
-  canvas.addEventListener('click', event => {{ const hit = nearest(event.clientX, event.clientY); if (!hit || hit.kind !== 'rep') return; selected = hit.index; render(); }});
+  canvas.addEventListener('click', event => {{ const hit = nearest(event.clientX, event.clientY); if (!hit) return; selected = hit.index; render(); }});
   new ResizeObserver(render).observe(plot); render();
 }})();
 </script>
@@ -493,7 +428,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-gap", type=int, default=8192)
     parser.add_argument("--storage-limit-gib", type=float, default=1024.0)
     parser.add_argument("--block-size", type=int, default=64)
-    parser.add_argument("--curve-bins", type=int, default=600)
     parser.add_argument("--unrestricted-csv", type=Path, default=DEFAULT_UNRESTRICTED_CSV)
     parser.add_argument("--unrestricted-json", type=Path, default=DEFAULT_UNRESTRICTED_JSON)
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_EQUAL_CSV)
@@ -550,16 +484,9 @@ def main() -> None:
         exact_equal,
         full_ns,
     )
-    curve = build_comparison_curve(unrestricted_frontier, equal_frontier)
-    plotted_curve = downsample_extrema(curve, args.curve_bins)
-    augmented_frontier = pareto_frontier(
-        np.concatenate((unrestricted_frontier, equal_frontier), axis=0)
-    )
-    equal_rows_on_augmented = int(np.count_nonzero(augmented_frontier[:, 2] == augmented_frontier[:, 3]))
     exact_penalties = np.asarray(
         [float(row["exact_penalty_percent"]) for row in representatives]
     )
-    sampled_penalties = curve[:, 1]
     total_seconds = perf_counter() - started
     metadata: dict[str, object] = {
         "model": published_metadata["model"],
@@ -574,16 +501,6 @@ def main() -> None:
         "equal_gap_optimal_split": L - 1,
         "equal_gap_optimal_split_reason": "C(l,g,g)=l*mean(N mod g)+(L-l)*g-sum_k mean((N mod g-kd)_+), so it decreases with l",
         "verified_reduction_gaps": verification_gaps,
-        "comparison_curve_points": int(curve.shape[0]),
-        "comparison_plot_points": int(plotted_curve.shape[0]),
-        "sampled_penalty_percent": {
-            "min": float(sampled_penalties.min()),
-            "median": float(np.median(sampled_penalties)),
-            "p95": float(np.percentile(sampled_penalties, 95)),
-            "max": float(sampled_penalties.max()),
-            "equal_better_point_count": int(np.count_nonzero(sampled_penalties < -1e-9)),
-            "equal_match_point_count": int(np.count_nonzero(np.abs(sampled_penalties) <= 1e-9)),
-        },
         "representative_exact_penalty_percent": {
             "min": float(exact_penalties.min()),
             "median": float(np.median(exact_penalties)),
@@ -591,8 +508,6 @@ def main() -> None:
             "equal_better_point_count": int(np.count_nonzero(exact_penalties < -1e-9)),
             "equal_match_point_count": int(np.count_nonzero(np.abs(exact_penalties) <= 1e-9)),
         },
-        "augmented_frontier_points": int(augmented_frontier.shape[0]),
-        "equal_gap_rows_on_augmented_frontier": equal_rows_on_augmented,
         "runtime_seconds": {
             "sampled_equal_gap_exhaustive": sampled_seconds,
             "exact_equal_gap_exhaustive": exact_seconds,
@@ -608,7 +523,7 @@ def main() -> None:
     )
     update_standalone_html(
         args.output_html,
-        comparison_fragment(plotted_curve, representatives),
+        comparison_fragment(representatives),
     )
     print(json.dumps(metadata, indent=2, ensure_ascii=False))
     print(f"CSV: {args.output_csv.resolve()}")

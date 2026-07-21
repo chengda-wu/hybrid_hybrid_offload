@@ -23,16 +23,6 @@
     6118,
     8192
   ],
-  "comparison_curve_points": 21213,
-  "comparison_plot_points": 1298,
-  "sampled_penalty_percent": {
-    "min": -4.072663493737183,
-    "median": 1.4652658918609784,
-    "p95": 2.4545040733959795,
-    "max": 24.266741723486195,
-    "equal_better_point_count": 213,
-    "equal_match_point_count": 123
-  },
   "representative_exact_penalty_percent": {
     "min": 0.0,
     "median": 1.1668840366352295,
@@ -40,12 +30,10 @@
     "equal_better_point_count": 0,
     "equal_match_point_count": 2
   },
-  "augmented_frontier_points": 21091,
-  "equal_gap_rows_on_augmented_frontier": 214,
   "runtime_seconds": {
-    "sampled_equal_gap_exhaustive": 3.215479458001937,
-    "exact_equal_gap_exhaustive": 0.4788361669998267,
-    "total": 4.816708124999423
+    "sampled_equal_gap_exhaustive": 3.8938137909972284,
+    "exact_equal_gap_exhaustive": 0.5739895420010726,
+    "total": 4.822545250000985
   },
   "representative_points": [
     {
