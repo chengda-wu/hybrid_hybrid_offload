@@ -6,9 +6,9 @@ to inspect l, g, DRAM storage, recovery compute, and Pareto membership. The l/g
 sliders select and highlight an exact point without hiding the rest of the data.
 
 Usage:
-    python3 docs/dsv4_kv_cache/plot_checkpoint_pareto.py
-    python3 docs/dsv4_kv_cache/plot_checkpoint_pareto.py --open
-    python3 docs/dsv4_kv_cache/plot_checkpoint_pareto.py --rebuild-data
+    python3 docs/dsv4_kv_cache/segmented_checkpoint_gap/plot_checkpoint_pareto.py
+    python3 docs/dsv4_kv_cache/segmented_checkpoint_gap/plot_checkpoint_pareto.py --open
+    python3 docs/dsv4_kv_cache/segmented_checkpoint_gap/plot_checkpoint_pareto.py --rebuild-data
 """
 
 from __future__ import annotations
@@ -37,11 +37,23 @@ DEFAULT_OUTPUT = Path(__file__).with_name("dsv4_checkpoint_pareto_interactive.ht
 
 
 def recovery_compute(l: int, g: int) -> float:
-    """Discrete-phase average hidden-state token-layer count."""
+    """Exact discrete-phase average hidden-state token-layer count."""
+    low_removed = 0
+    for layer in range(1, l + 1):
+        tail = max(g - 1 - layer * D, 0)
+        low_removed += tail * (tail + 1) / 2
+    low_removed /= g
+
+    high_phase_rows = max((g - 1) // D, 0)
+    high_removed = (
+        high_phase_rows * g
+        - D * high_phase_rows * (high_phase_rows + 1) // 2
+    )
     return (
         l * (g - 1) / 2
+        - low_removed
         + 2 * g * (L - l)
-        - (5 * g * g - 3 * g + 1) / (12 * D)
+        - high_removed / 2
     )
 
 
@@ -59,7 +71,10 @@ def build_points() -> list[list[float | int]]:
         low_bytes = prefix_bytes[l]
         high_bytes = total_bytes - low_bytes
         for g in range(1, max_g + 1):
-            storage_gib = N * (low_bytes / g + high_bytes / (2 * g)) / GIB
+            storage_gib = (
+                ((N + g - 1) // g) * low_bytes
+                + ((N + 2 * g - 1) // (2 * g)) * high_bytes
+            ) / GIB
             raw.append((storage_gib, recovery_compute(l, g), g, l))
 
     ranked = sorted(raw, key=lambda item: (item[0], item[1]))
@@ -80,7 +95,7 @@ def build_points() -> list[list[float | int]]:
 def write_points_csv(path: Path, points: list[list[float | int]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.writer(handle)
+        writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(
             ["storage_gib", "recovery_token_layers", "g", "l", "is_pareto"]
         )

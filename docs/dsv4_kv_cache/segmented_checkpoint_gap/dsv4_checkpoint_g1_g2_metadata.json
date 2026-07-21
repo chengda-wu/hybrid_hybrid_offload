@@ -1,0 +1,132 @@
+{
+  "model": "DeepSeek-V4-Flash",
+  "L": 43,
+  "W": 128,
+  "N_min": 1000000,
+  "N_max": 2000000,
+  "N_workload": "uniform_integer_interval",
+  "N_sampling": "nested_uniform_without_replacement_with_shared_samples_and_endpoints",
+  "random_seed": 20260721,
+  "coarse_n_samples": 1024,
+  "refine_n_samples": 8192,
+  "final_n_samples": 32768,
+  "storage_mean": "exact_over_full_N_interval",
+  "recovery_mean": "sampled_exact_discrete_formula",
+  "metrics": [
+    "mean_storage_gib",
+    "mean_recovery_token_layers"
+  ],
+  "gap_grid": {
+    "max_gap": 8192,
+    "dense_integer_range": [
+      1,
+      256
+    ],
+    "coarse_step_above_dense_range": 16,
+    "layer_hit_boundaries_included": true,
+    "grid_size": 790
+  },
+  "refinement": {
+    "coarse_relative_margin": 0.02,
+    "medium_radius": 8,
+    "medium_stride": 1,
+    "medium_full_integer_axes": true,
+    "refine_relative_margin": 0.005,
+    "final_radius": 3,
+    "final_stride": 1
+  },
+  "storage_limit_gib": 1024.0,
+  "workers": 8,
+  "coarse_candidate_points_after_storage_filter": 12791827,
+  "coarse_local_pareto_points": 91130,
+  "coarse_near_frontier_seed_points": 11444,
+  "refine_candidate_parameters": 1607836,
+  "refine_points_after_storage_filter": 1607212,
+  "refine_near_frontier_seed_points": 114709,
+  "final_candidate_parameters": 499453,
+  "previous_frontier_guard_parameters": 9,
+  "previous_frontier_guard_candidates": 1995,
+  "final_points_after_storage_filter": 499262,
+  "pareto_points": 21213,
+  "interactive_cloud_points": 12600,
+  "runtime_seconds": {
+    "coarse": 86.82513604100313,
+    "refine": 67.16341933299918,
+    "final": 73.06038795799759,
+    "total": 228.71431487500013
+  },
+  "representative_points": [
+    {
+      "storage_limit_gib": 4,
+      "storage_gib": 3.540612059671324,
+      "recovery_token_layers": 75989.9232788086,
+      "g1": 6115,
+      "g2": 6118,
+      "l": 37
+    },
+    {
+      "storage_limit_gib": 8,
+      "storage_gib": 7.875971319518921,
+      "recovery_token_layers": 47684.80603027344,
+      "g1": 2746,
+      "g2": 2747,
+      "l": 39
+    },
+    {
+      "storage_limit_gib": 16,
+      "storage_gib": 15.996321267824943,
+      "recovery_token_layers": 27001.92202758789,
+      "g1": 1351,
+      "g2": 1396,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 32,
+      "storage_gib": 31.92460327010544,
+      "recovery_token_layers": 14168.005828857422,
+      "g1": 677,
+      "g2": 678,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 64,
+      "storage_gib": 63.93165631702713,
+      "recovery_token_layers": 7295.351348876953,
+      "g1": 338,
+      "g2": 341,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 128,
+      "storage_gib": 127.85991377559586,
+      "recovery_token_layers": 3687.5701293945312,
+      "g1": 169,
+      "g2": 170,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 256,
+      "storage_gib": 254.2237329750216,
+      "recovery_token_layers": 1855.1100463867188,
+      "g1": 85,
+      "g2": 85,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 512,
+      "storage_gib": 502.5282508013223,
+      "recovery_token_layers": 925.3960571289062,
+      "g1": 43,
+      "g2": 43,
+      "l": 42
+    },
+    {
+      "storage_limit_gib": 1024,
+      "storage_gib": 1022.6756833978515,
+      "recovery_token_layers": 458.6456298828125,
+      "g1": 21,
+      "g2": 24,
+      "l": 41
+    }
+  ]
+}

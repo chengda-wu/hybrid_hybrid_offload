@@ -18,6 +18,7 @@
 | [Part 4 · 运行时与 APC 例子](04-runtime-and-apc.md) | scheduler/hash block size、block 生命周期、分配 / APC 命中 / 释放完整例子 | §5–§7 |
 | [Part 5 · 附录](05-appendix.md) | 源码索引、数值实测验证、`dsv4_layout.py` probe 脚本说明 | §8–§9 |
 | [Part 6 · Delta 段三角形计算可行性](06-staircase-delta-feasibility.md) | APC 命中分化、delta 段冗余重算、staircase 三角形论证、省量分析、多方向探索（层维保留 / C4-C128 差异化 / token 维周期存储）、前提与替代方案 | §10–§16 |
+| [Segmented checkpoint gap](segmented_checkpoint_gap/segmented-checkpoint-gap-analysis.md) | 分段 gap 推导、旧 $g,2g$ 特例、一般 $g_1,g_2$ Pareto 实验及图表 | 独立专题 |
 
 ## 快速验证
 
