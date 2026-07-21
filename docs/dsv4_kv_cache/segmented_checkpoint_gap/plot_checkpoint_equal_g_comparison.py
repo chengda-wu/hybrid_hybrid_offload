@@ -42,13 +42,9 @@ VIS_END = "<!-- equal-gap-comparison:end -->"
 FLOAT_STORAGE_TOLERANCE_GIB = 5e-8
 
 
-def equal_gap_compute(phases: np.ndarray, gaps: np.ndarray) -> np.ndarray:
-    """Return C for the optimal equal-gap split l=L-1, vectorized by gap."""
-    return (
-        (L - 1) * phases
-        + gaps
-        - triangle_removed(phases, L)
-    )
+def equal_gap_compute(phases: np.ndarray) -> np.ndarray:
+    """Return the split-independent C for g1 == g2, vectorized by gap."""
+    return L * phases - triangle_removed(phases, L)
 
 
 def evaluate_sampled_equal_gaps(
@@ -67,9 +63,7 @@ def evaluate_sampled_equal_gaps(
         stop = min(start + block_size, gaps.size)
         block = gaps[start:stop]
         phases = ns[:, None] % block[None, :]
-        sampled_compute[start:stop] = equal_gap_compute(
-            phases, block[None, :]
-        ).mean(axis=0)
+        sampled_compute[start:stop] = equal_gap_compute(phases).mean(axis=0)
     return gaps, storage, sampled_compute
 
 
@@ -98,7 +92,7 @@ def evaluate_exact_equal_gaps(
         gap = int(raw_gap)
         phases = np.arange(gap, dtype=np.int64)
         counts = residue_counts(gap, n_min, n_max)
-        compute = equal_gap_compute(phases, np.asarray(gap, dtype=np.int64))
+        compute = equal_gap_compute(phases)
         exact_compute[index] = float(np.dot(counts, compute)) / population
     return exact_compute
 
@@ -110,38 +104,39 @@ def exact_two_gap_compute(
     g2: int,
 ) -> float:
     r1 = ns % g1
-    boundary1 = ns - np.minimum(r1, split * D)
+    offset1 = np.minimum(r1, split * D)
+    boundary1 = ns - offset1
     r2 = boundary1 % g2
+    base2 = offset1 + r2
     compute = (
         split * r1
         - triangle_removed(r1, split)
-        + (L - split) * g2
+        + (L - split) * base2
         - triangle_removed(r2, L - split)
     )
     return float(compute.mean())
 
 
 def verify_equal_gap_reduction(ns: np.ndarray, gaps: list[int]) -> None:
-    """Check the closed form and l=L-1 optimum against the two-gap formula."""
+    """Check the closed form and split invariance against the two-gap formula."""
     check_ns = ns[: min(ns.size, 2048)]
     for gap in gaps:
         phases = check_ns % gap
         common_removed = triangle_removed(phases, L)
-        means: list[float] = []
         for split in range(1, L):
-            r2 = np.maximum(phases - split * D, 0)
+            offset1 = np.minimum(phases, split * D)
+            boundary1 = check_ns - offset1
+            r2 = boundary1 % gap
+            base2 = offset1 + r2
             direct = (
                 split * phases
                 - triangle_removed(phases, split)
-                + (L - split) * gap
+                + (L - split) * base2
                 - triangle_removed(r2, L - split)
             )
-            reduced = split * phases + (L - split) * gap - common_removed
+            reduced = L * phases - common_removed
             if not np.array_equal(direct, reduced):
                 raise AssertionError(f"equal-gap reduction failed for g={gap}, l={split}")
-            means.append(float(reduced.mean()))
-        if int(np.argmin(means)) + 1 != L - 1:
-            raise AssertionError(f"l={L - 1} is not optimal for g={gap}")
 
 
 def read_frontier(path: Path) -> np.ndarray:
@@ -372,13 +367,28 @@ def comparison_fragment(representatives: list[dict[str, int | float]]) -> str:
 {VIS_END}"""
 
 
-def update_standalone_html(path: Path, fragment: str) -> None:
+def update_standalone_html(
+    path: Path,
+    fragment: str,
+    primary_fragment: str | None = None,
+) -> None:
     outer = path.read_text(encoding="utf-8")
     match = re.search(r'(srcdoc=")(.*?)("></iframe>)', outer, flags=re.DOTALL)
     if match is None:
         raise ValueError(f"could not find iframe srcdoc in {path}")
     inner = html.unescape(match.group(2))
     original_root = '<div id="dsv4-g1-g2-pareto" class="viz-root">'
+    if primary_fragment is not None:
+        primary_start = inner.find(original_root)
+        primary_end = inner.find(VIS_START, primary_start)
+        if primary_start < 0 or primary_end < 0:
+            raise ValueError("could not find the primary visualization boundaries")
+        inner = (
+            inner[:primary_start]
+            + primary_fragment.rstrip()
+            + "\n\n"
+            + inner[primary_end:]
+        )
     original_title = (
         '<h2 id="dsv4-original-title" class="dsv4-chart-title">'
         '双 gap Pareto 前沿（g₁ ≤ g₂）</h2>'
@@ -433,6 +443,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-csv", type=Path, default=DEFAULT_EQUAL_CSV)
     parser.add_argument("--output-json", type=Path, default=DEFAULT_EQUAL_JSON)
     parser.add_argument("--output-html", type=Path, default=DEFAULT_HTML)
+    parser.add_argument("--primary-fragment", type=Path)
     return parser.parse_args()
 
 
@@ -498,8 +509,9 @@ def main() -> None:
         "max_gap": args.max_gap,
         "equal_gap_candidate_count": int(all_equal_points.shape[0]),
         "equal_gap_sampled_pareto_points": int(equal_frontier.shape[0]),
-        "equal_gap_optimal_split": L - 1,
-        "equal_gap_optimal_split_reason": "C(l,g,g)=l*mean(N mod g)+(L-l)*g-sum_k mean((N mod g-kd)_+), so it decreases with l",
+        "equal_gap_representative_split": L - 1,
+        "equal_gap_split_invariant": True,
+        "equal_gap_split_reason": "C(N,l,g,g)=L*(N mod g)-T_L(N mod g), independent of l",
         "verified_reduction_gaps": verification_gaps,
         "representative_exact_penalty_percent": {
             "min": float(exact_penalties.min()),
@@ -524,6 +536,11 @@ def main() -> None:
     update_standalone_html(
         args.output_html,
         comparison_fragment(representatives),
+        (
+            args.primary_fragment.read_text(encoding="utf-8")
+            if args.primary_fragment is not None
+            else None
+        ),
     )
     print(json.dumps(metadata, indent=2, ensure_ascii=False))
     print(f"CSV: {args.output_csv.resolve()}")

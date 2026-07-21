@@ -281,15 +281,19 @@ class Evaluator:
 
         r1 = self.phase1(g1)
         low_compute = float(np.mean(split * r1 - triangle_removed(r1, split)))
-        boundary1 = self.ns - np.minimum(r1, split * D)
+        offset1 = np.minimum(r1, split * D)
+        boundary1 = self.ns - offset1
         height2 = L - split
         rows: list[np.ndarray] = []
         for start in range(0, g2.size, self.block_size):
             stop = min(start + self.block_size, g2.size)
             block = g2[start:stop]
             phase2 = boundary1[:, None] % block[None, :]
-            removed = triangle_removed(phase2, height2).mean(axis=0)
-            compute = low_compute + height2 * block - removed
+            base2 = offset1[:, None] + phase2
+            high_compute = (
+                height2 * base2 - triangle_removed(phase2, height2)
+            ).mean(axis=0)
+            compute = low_compute + high_compute
             rows.append(
                 np.column_stack(
                     (

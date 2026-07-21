@@ -38,95 +38,95 @@
   "storage_limit_gib": 1024.0,
   "workers": 8,
   "coarse_candidate_points_after_storage_filter": 12791827,
-  "coarse_local_pareto_points": 91130,
-  "coarse_near_frontier_seed_points": 11444,
-  "refine_candidate_parameters": 1607836,
-  "refine_points_after_storage_filter": 1607212,
-  "refine_near_frontier_seed_points": 114709,
-  "final_candidate_parameters": 499453,
+  "coarse_local_pareto_points": 17868,
+  "coarse_near_frontier_seed_points": 10502,
+  "refine_candidate_parameters": 1618256,
+  "refine_points_after_storage_filter": 1613799,
+  "refine_near_frontier_seed_points": 87374,
+  "final_candidate_parameters": 519466,
   "previous_frontier_guard_parameters": 9,
   "previous_frontier_guard_candidates": 1995,
-  "final_points_after_storage_filter": 499262,
-  "pareto_points": 21213,
+  "final_points_after_storage_filter": 518806,
+  "pareto_points": 3543,
   "interactive_cloud_points": 12600,
   "runtime_seconds": {
-    "coarse": 86.82513604100313,
-    "refine": 67.16341933299918,
-    "final": 73.06038795799759,
-    "total": 228.71431487500013
+    "coarse": 190.49309883299793,
+    "refine": 171.62487133299874,
+    "final": 188.16604012500102,
+    "total": 552.4712360420017
   },
   "representative_points": [
     {
       "storage_limit_gib": 4,
-      "storage_gib": 3.540612059671324,
-      "recovery_token_layers": 75989.9232788086,
-      "g1": 6115,
-      "g2": 6118,
+      "storage_gib": 3.9973923655614167,
+      "recovery_token_layers": 78383.50701904297,
+      "g1": 5150,
+      "g2": 7725,
       "l": 37
     },
     {
       "storage_limit_gib": 8,
-      "storage_gib": 7.875971319518921,
-      "recovery_token_layers": 47684.80603027344,
-      "g1": 2746,
-      "g2": 2747,
-      "l": 39
+      "storage_gib": 7.910903897338423,
+      "recovery_token_layers": 47087.76071166992,
+      "g1": 2466,
+      "g2": 7398,
+      "l": 37
     },
     {
       "storage_limit_gib": 16,
-      "storage_gib": 15.996321267824943,
-      "recovery_token_layers": 27001.92202758789,
-      "g1": 1351,
-      "g2": 1396,
-      "l": 42
+      "storage_gib": 15.985439900987977,
+      "recovery_token_layers": 26129.159057617188,
+      "g1": 1264,
+      "g2": 3792,
+      "l": 39
     },
     {
       "storage_limit_gib": 32,
-      "storage_gib": 31.92460327010544,
-      "recovery_token_layers": 14168.005828857422,
-      "g1": 677,
-      "g2": 678,
-      "l": 42
+      "storage_gib": 31.998463962192083,
+      "recovery_token_layers": 13835.41098022461,
+      "g1": 647,
+      "g2": 4602,
+      "l": 41
     },
     {
       "storage_limit_gib": 64,
-      "storage_gib": 63.93165631702713,
-      "recovery_token_layers": 7295.351348876953,
-      "g1": 338,
-      "g2": 341,
-      "l": 42
+      "storage_gib": 63.801405471832716,
+      "recovery_token_layers": 7119.749267578125,
+      "g1": 171,
+      "g2": 342,
+      "l": 2
     },
     {
       "storage_limit_gib": 128,
-      "storage_gib": 127.85991377559586,
-      "recovery_token_layers": 3687.5701293945312,
-      "g1": 169,
-      "g2": 170,
-      "l": 42
+      "storage_gib": 126.66292017059786,
+      "recovery_token_layers": 3576.193328857422,
+      "g1": 87,
+      "g2": 174,
+      "l": 3
     },
     {
       "storage_limit_gib": 256,
-      "storage_gib": 254.2237329750216,
-      "recovery_token_layers": 1855.1100463867188,
-      "g1": 85,
-      "g2": 85,
-      "l": 42
+      "storage_gib": 253.7004272164267,
+      "recovery_token_layers": 1777.9111633300781,
+      "g1": 43,
+      "g2": 86,
+      "l": 2
     },
     {
       "storage_limit_gib": 512,
-      "storage_gib": 502.5282508013223,
-      "recovery_token_layers": 925.3960571289062,
-      "g1": 43,
-      "g2": 43,
-      "l": 42
+      "storage_gib": 500.8729938207271,
+      "recovery_token_layers": 891.8812561035156,
+      "g1": 22,
+      "g2": 44,
+      "l": 3
     },
     {
       "storage_limit_gib": 1024,
-      "storage_gib": 1022.6756833978515,
-      "recovery_token_layers": 458.6456298828125,
-      "g1": 21,
-      "g2": 24,
-      "l": 41
+      "storage_gib": 1001.7387847751187,
+      "recovery_token_layers": 434.2855529785156,
+      "g1": 11,
+      "g2": 22,
+      "l": 3
     }
   ]
 }

@@ -78,11 +78,20 @@ r_2=b_1\bmod g_2
 }
 $$
 
-记 $k=L-l$。沿用本文原有的深层 checkpoint 单元计数约定，第二段第 $j$ 层的恢复宽度为
+第二段相对最近 $g_2$ checkpoint 的基准恢复长度为
 
 $$
-g_2-r_2+\min(r_2,jd)
-=g_2-(r_2-jd)_+.
+\boxed{
+a_2
+=N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2
+=\min(r_1,ld)+r_2.
+}
+$$
+
+记 $k=L-l$。第二段第 $j$ 层的恢复宽度为
+
+$$
+a_2-(r_2-jd)_+.
 $$
 
 因此第二段计算量为
@@ -90,18 +99,18 @@ $$
 $$
 \boxed{
 C_2(N)
-=\sum_{j=1}^{k}\left[g_2-(r_2-jd)_+\right]
-=kg_2-T_k(r_2).
+=\sum_{j=1}^{k}\left[a_2-(r_2-jd)_+\right]
+=ka_2-T_k(r_2).
 }
 $$
 
 第二段命中 checkpoint 当且仅当 $r_2\le kd$。若 $r_2>kd$，则
 
 $$
-C_2(N)=k(g_2-r_2)+d\frac{k(k+1)}2.
+C_2(N)=k\min(r_1,ld)+d\frac{k(k+1)}2.
 $$
 
-特别地，$r_2=0$ 时 $C_2=kg_2$，这与后文旧特例中的 $C_{\mathrm{high}}^{(0)}=2gk$ 一致。
+特别地，$r_2=0$ 时 $C_2=k\min(r_1,ld)$。
 
 ### 1.3 总计算量
 
@@ -114,7 +123,9 @@ r_1&=N\bmod g_1,\\
 b_1&=N-\min(r_1,ld),\\
 r_2&=b_1\bmod g_2,\\
 C(N,l,g_1,g_2)
-&=lr_1-T_l(r_1)+(L-l)g_2-T_{L-l}(r_2).
+&=lr_1-T_l(r_1)\\
+&\quad +(L-l)\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
+-T_{L-l}(r_2).
 \end{aligned}
 }
 $$
@@ -133,12 +144,12 @@ $$
 }
 $$
 
-第一段命中后，$b_1$ 是 $g$ 的整数倍，其相对 $2g$ 网格的相位只有 $0$ 和 $g$，在一个 $2g$ 周期内各占一半。因此
+第一段命中后，$b_1$ 是 $g$ 的整数倍，其相对 $2g$ 网格的相位只有 $0$ 和 $g$，在一个 $2g$ 周期内各占一半。对给定的 $r$，第二段的基准恢复长度分别为 $r$ 和 $r+g$，因此
 
 $$
-C_{\mathrm{high}}^{(0)}=2g(L-l),
+C_{\mathrm{high}}^{(0)}(r)=(L-l)r,
 \qquad
-C_{\mathrm{high}}^{(g)}=2g(L-l)-T_{L-l}(g),
+C_{\mathrm{high}}^{(g)}(r)=(L-l)(r+g)-T_{L-l}(g),
 $$
 
 从而
@@ -147,7 +158,7 @@ $$
 \boxed{
 \overline C(L,W,l,g)
 =\frac{l(g-1)}2
-+2g(L-l)
++\frac{(L-l)(2g-1)}2
 -\frac1g\sum_{r=0}^{g-1}T_l(r)
 -\frac{T_{L-l}(g)}2.
 }
@@ -264,7 +275,9 @@ r_1&=N\bmod g_1,\\
 b_1&=N-\min(r_1,127l),\\
 r_2&=b_1\bmod g_2,\\
 C_{\mathrm{DSV4}}(N,l,g_1,g_2)
-&=lr_1-T_l(r_1)+(43-l)g_2-T_{43-l}(r_2).
+&=lr_1-T_l(r_1)\\
+&\quad +(43-l)\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
+-T_{43-l}(r_2).
 \end{aligned}
 }
 $$
@@ -287,7 +300,7 @@ $$
 \boxed{
 \overline C_{\mathrm{DSV4}}(l,g)
 =\frac{l(g-1)}{2}
-+2g(43-l)
++\frac{(43-l)(2g-1)}2
 -\frac1g\sum_{r=0}^{g-1}T_l(r)
 -\frac{T_{43-l}(g)}2.
 }
@@ -321,4 +334,4 @@ B(l',g')\le B(l,g),
 C(l',g')\le C(l,g),
 $$
 
-且至少一个不等式严格成立，则 $(l,g)$ 是 Pareto 最优点。上述可行域共生成 58695 个参数点，其中 1843 个为 Pareto 点。数据和绘图实现见 [`dsv4_checkpoint_points.csv`](./dsv4_checkpoint_points.csv) 与 [`plot_checkpoint_pareto.py`](./plot_checkpoint_pareto.py)，静态图见 [`imgs/dsv4-checkpoint-pareto-discrete.png`](./imgs/dsv4-checkpoint-pareto-discrete.png)。
+且至少一个不等式严格成立，则 $(l,g)$ 是 Pareto 最优点。上述可行域共生成 58695 个参数点，其中 1882 个为 Pareto 点。数据见 [`dsv4_checkpoint_points.csv`](./dsv4_checkpoint_points.csv)，交互图见 [`dsv4_checkpoint_pareto_interactive.html`](./dsv4_checkpoint_pareto_interactive.html)，静态图见 [`imgs/dsv4-checkpoint-pareto-discrete.png`](./imgs/dsv4-checkpoint-pareto-discrete.png)，生成程序见 [`plot_checkpoint_pareto.py`](./plot_checkpoint_pareto.py)。

@@ -34,17 +34,18 @@ for _ in range(20):
 LAYER_CHECKPOINT_BYTES.append(157_824)
 DEFAULT_DATA = Path(__file__).with_name("dsv4_checkpoint_points.csv")
 DEFAULT_OUTPUT = Path(__file__).with_name("dsv4_checkpoint_pareto_interactive.html")
+DEFAULT_PNG = Path(__file__).with_name("imgs") / "dsv4-checkpoint-pareto-discrete.png"
 
 
 def recovery_compute(l: int, g: int) -> float:
-    """Exact discrete-phase average hidden-state token-layer count."""
+    """Exact 2g-period average for g1=g and g2=2g under hit constraints."""
     low_removed = 0
     for layer in range(1, l + 1):
         tail = max(g - 1 - layer * D, 0)
         low_removed += tail * (tail + 1) / 2
     low_removed /= g
 
-    high_phase_rows = max((g - 1) // D, 0)
+    high_phase_rows = min(L - l, max((g - 1) // D, 0))
     high_removed = (
         high_phase_rows * g
         - D * high_phase_rows * (high_phase_rows + 1) // 2
@@ -52,7 +53,7 @@ def recovery_compute(l: int, g: int) -> float:
     return (
         l * (g - 1) / 2
         - low_removed
-        + 2 * g * (L - l)
+        + (L - l) * (2 * g - 1) / 2
         - high_removed / 2
     )
 
@@ -126,6 +127,41 @@ def read_points_csv(path: Path) -> list[list[float | int]]:
             ]
             for row in reader
         ]
+
+
+def write_static_plot(path: Path, points: list[list[float | int]]) -> None:
+    """Render the g/2g Pareto frontier used by the analysis document."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    frontier = sorted((row for row in points if row[4]), key=lambda row: row[0])
+    storage = [float(row[0]) for row in frontier]
+    compute = [float(row[1]) for row in frontier]
+
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.scatter(storage, compute, s=8, color="#2563eb", alpha=0.9, linewidths=0)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("DRAM checkpoint storage (GiB)")
+    ax.set_ylabel("Mean recovery compute (discrete token-layers)")
+    ax.set_title("DeepSeek V4 Flash g/2g checkpoint Pareto frontier")
+    ax.grid(True, which="major", alpha=0.35)
+    ax.grid(True, which="minor", alpha=0.15)
+    ax.text(
+        0.98,
+        0.02,
+        f"Pareto points={len(frontier):,}",
+        transform=ax.transAxes,
+        ha="right",
+        va="bottom",
+        color="#475569",
+    )
+    fig.tight_layout()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 HTML_TEMPLATE = r"""<!doctype html>
@@ -270,6 +306,12 @@ def main() -> None:
         help="input CSV table (default: %(default)s)",
     )
     parser.add_argument(
+        "--output-png",
+        type=Path,
+        default=DEFAULT_PNG,
+        help="output static PNG path (default: %(default)s)",
+    )
+    parser.add_argument(
         "--rebuild-data",
         action="store_true",
         help="recompute all points and overwrite --data before rendering",
@@ -287,8 +329,10 @@ def main() -> None:
     html = HTML_TEMPLATE.replace("__POINTS_JSON__", payload)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(html, encoding="utf-8")
+    write_static_plot(args.output_png, points)
     print(
         f"wrote {args.output.resolve()}\n"
+        f"wrote {args.output_png.resolve()}\n"
         f"points={len(points)}, pareto={sum(row[4] for row in points)}"
     )
     if args.open:
