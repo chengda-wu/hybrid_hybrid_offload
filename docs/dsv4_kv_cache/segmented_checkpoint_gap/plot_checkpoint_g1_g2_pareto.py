@@ -35,28 +35,33 @@ W = 128
 D = W - 1
 GIB = 1024**3
 
-LAYER_CHECKPOINT_BYTES = [74_880, 74_880]
+LAYER_CHECKPOINT_BYTES = []
 for _ in range(20):
     LAYER_CHECKPOINT_BYTES.extend([157_824, 600_192])
 LAYER_CHECKPOINT_BYTES.append(157_824)
+LAYER_CHECKPOINT_BYTES.extend([74_880, 74_880])
 PREFIX_BYTES = np.concatenate(
     ([0], np.cumsum(LAYER_CHECKPOINT_BYTES, dtype=np.int64))
 )
 TOTAL_BYTES = int(PREFIX_BYTES[-1])
 
-# Representative points published by the preceding lower-resolution run. Keep
-# integer neighborhoods around them in every refined run so increased search
-# resolution cannot accidentally discard a previously reported operating point.
+# Layer indices increase from the input side toward the output side.  Therefore
+# split=l is deeper when l is larger.  Layers 1..l, farther from the output, use
+# g2; layers l+1..L, nearer the output, use g1.  Recovery walks from the output
+# toward the input and therefore still evaluates g1 before g2.
+
+# These are the preceding run's regression guards remapped from the old
+# output-to-input layer count via l_new = L - l_old.
 PREVIOUS_REPRESENTATIVE_PARAMETERS = [
-    (37, 6122, 6126),
-    (41, 2727, 2779),
-    (42, 1394, 1422),
-    (42, 689, 719),
-    (42, 341, 364),
-    (42, 170, 171),
-    (42, 85, 85),
-    (42, 43, 43),
-    (42, 22, 22),
+    (6, 6122, 6126),
+    (2, 2727, 2779),
+    (1, 1394, 1422),
+    (1, 689, 719),
+    (1, 341, 364),
+    (1, 170, 171),
+    (1, 85, 85),
+    (1, 43, 43),
+    (1, 22, 22),
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -267,11 +272,11 @@ class Evaluator:
         if not g2_values:
             return np.empty((0, 5), dtype=np.float64)
         g2 = np.asarray(g2_values, dtype=np.int64)
-        low_bytes = int(PREFIX_BYTES[split])
-        high_bytes = TOTAL_BYTES - low_bytes
+        far_bytes = int(PREFIX_BYTES[split])
+        near_bytes = TOTAL_BYTES - far_bytes
         storage = (
-            low_bytes * self._mean_count[g1]
-            + high_bytes * np.asarray([self._mean_count[int(value)] for value in g2])
+            near_bytes * self._mean_count[g1]
+            + far_bytes * np.asarray([self._mean_count[int(value)] for value in g2])
         ) / GIB
         valid = storage <= self.storage_limit_gib
         if not np.any(valid):
@@ -279,21 +284,23 @@ class Evaluator:
         g2 = g2[valid]
         storage = storage[valid]
 
+        near_height = L - split
         r1 = self.phase1(g1)
-        low_compute = float(np.mean(split * r1 - triangle_removed(r1, split)))
-        offset1 = np.minimum(r1, split * D)
+        near_compute = float(
+            np.mean(near_height * r1 - triangle_removed(r1, near_height))
+        )
+        offset1 = np.minimum(r1, near_height * D)
         boundary1 = self.ns - offset1
-        height2 = L - split
         rows: list[np.ndarray] = []
         for start in range(0, g2.size, self.block_size):
             stop = min(start + self.block_size, g2.size)
             block = g2[start:stop]
             phase2 = boundary1[:, None] % block[None, :]
             base2 = offset1[:, None] + phase2
-            high_compute = (
-                height2 * base2 - triangle_removed(phase2, height2)
+            far_compute = (
+                split * base2 - triangle_removed(phase2, split)
             ).mean(axis=0)
-            compute = low_compute + high_compute
+            compute = near_compute + far_compute
             rows.append(
                 np.column_stack(
                     (
@@ -468,13 +475,13 @@ def write_plot(
 FRAGMENT_TEMPLATE = r"""<div id="dsv4-g1-g2-pareto" class="viz-root">
   <h2 id="dsv4-original-title" class="dsv4-chart-title">双 gap Pareto 前沿（g₁ ≤ g₂）</h2>
   <div class="viz-controls">
-    <label class="form-label" for="dsv4-l-input">浅层数 l：<output id="dsv4-l-out">42</output>
+    <label class="form-label" for="dsv4-l-input">分割层 l（越大越靠输出侧）：<output id="dsv4-l-out">42</output>
       <input class="form-range" id="dsv4-l-input" type="range" min="1" max="42" value="42" step="1">
     </label>
-    <label class="form-label" for="dsv4-g1-input">checkpoint gap g₁：<output id="dsv4-g1-out">1024</output>
+    <label class="form-label" for="dsv4-g1-input">输出侧 gap g₁：<output id="dsv4-g1-out">1024</output>
       <input class="form-range" id="dsv4-g1-input" type="range" min="1" max="8192" value="1024" step="1">
     </label>
-    <label class="form-label" for="dsv4-g2-input">checkpoint gap g₂：<output id="dsv4-g2-out">1024</output>
+    <label class="form-label" for="dsv4-g2-input">输入侧 gap g₂：<output id="dsv4-g2-out">1024</output>
       <input class="form-range" id="dsv4-g2-input" type="range" min="1" max="8192" value="1024" step="1">
     </label>
   </div>
@@ -790,6 +797,11 @@ def main() -> None:
         "model": "DeepSeek-V4-Flash",
         "L": L,
         "W": W,
+        "layer_order": "input_to_output",
+        "split_definition": "layers_1_through_l_use_g2; layers_l_plus_1_through_L_use_g1",
+        "split_depth": "larger_l_is_deeper_and_closer_to_output",
+        "g1_side": "near_output",
+        "g2_side": "far_from_output",
         "N_min": args.n_min,
         "N_max": args.n_max,
         "N_workload": "uniform_integer_interval",

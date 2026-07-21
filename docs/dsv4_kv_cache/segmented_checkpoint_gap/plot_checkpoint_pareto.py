@@ -26,12 +26,13 @@ D = W - 1
 N = 1_000_000
 GIB = 1024**3
 
-# Layer order from DeepSeek-V4-Flash compress_ratios:
-# [0, 0, 4, 128, 4, 128, ..., 4].
-LAYER_CHECKPOINT_BYTES = [74_880, 74_880]
+# Layer order is input side to output side, matching the document diagrams.
+# The output-side SWA-only pair therefore appears at the end.
+LAYER_CHECKPOINT_BYTES = []
 for _ in range(20):
     LAYER_CHECKPOINT_BYTES.extend([157_824, 600_192])
 LAYER_CHECKPOINT_BYTES.append(157_824)
+LAYER_CHECKPOINT_BYTES.extend([74_880, 74_880])
 DEFAULT_DATA = Path(__file__).with_name("dsv4_checkpoint_points.csv")
 DEFAULT_OUTPUT = Path(__file__).with_name("dsv4_checkpoint_pareto_interactive.html")
 DEFAULT_PNG = Path(__file__).with_name("imgs") / "dsv4-checkpoint-pareto-discrete.png"
@@ -39,22 +40,23 @@ DEFAULT_PNG = Path(__file__).with_name("imgs") / "dsv4-checkpoint-pareto-discret
 
 def recovery_compute(l: int, g: int) -> float:
     """Exact 2g-period average for g1=g and g2=2g under hit constraints."""
-    low_removed = 0
-    for layer in range(1, l + 1):
+    near_height = L - l
+    near_removed = 0.0
+    for layer in range(1, near_height + 1):
         tail = max(g - 1 - layer * D, 0)
-        low_removed += tail * (tail + 1) / 2
-    low_removed /= g
+        near_removed += tail * (tail + 1) / 2
+    near_removed /= g
 
-    high_phase_rows = min(L - l, max((g - 1) // D, 0))
-    high_removed = (
-        high_phase_rows * g
-        - D * high_phase_rows * (high_phase_rows + 1) // 2
+    far_phase_rows = min(l, max((g - 1) // D, 0))
+    far_removed = (
+        far_phase_rows * g
+        - D * far_phase_rows * (far_phase_rows + 1) // 2
     )
     return (
-        l * (g - 1) / 2
-        - low_removed
-        + (L - l) * (2 * g - 1) / 2
-        - high_removed / 2
+        near_height * (g - 1) / 2
+        - near_removed
+        + l * (2 * g - 1) / 2
+        - far_removed / 2
     )
 
 
@@ -66,15 +68,15 @@ def build_points() -> list[list[float | int]]:
     total_bytes = prefix_bytes[-1]
     raw: list[tuple[float, float, int, int]] = []
     for l in range(1, L):
-        # Complete-triangle hit constraints:
-        # g - 1 <= l(W - 1), g <= (L - l)(W - 1).
-        max_g = min(D * l + 1, D * (L - l))
-        low_bytes = prefix_bytes[l]
-        high_bytes = total_bytes - low_bytes
+        # The output-side g1=g segment is visited first during recovery:
+        # g-1 <= (L-l)(W-1), followed by g <= l(W-1) for the g2=2g segment.
+        max_g = min(D * (L - l) + 1, D * l)
+        far_bytes = prefix_bytes[l]
+        near_bytes = total_bytes - far_bytes
         for g in range(1, max_g + 1):
             storage_gib = (
-                ((N + g - 1) // g) * low_bytes
-                + ((N + 2 * g - 1) // (2 * g)) * high_bytes
+                ((N + 2 * g - 1) // (2 * g)) * far_bytes
+                + ((N + g - 1) // g) * near_bytes
             ) / GIB
             raw.append((storage_gib, recovery_compute(l, g), g, l))
 
@@ -196,7 +198,7 @@ canvas { display:block; width:100%; height:650px; }
 <main>
   <h1>DeepSeek V4 Flash checkpoint 存储—计算权衡</h1>
   <div class="controls">
-    <label><span>浅层数 l：<output id="l-out">21</output></span><input id="l-input" type="range" min="1" max="42" value="21" step="1"></label>
+    <label><span>分割层 l（越大越靠输出侧）：<output id="l-out">21</output></span><input id="l-input" type="range" min="1" max="42" value="21" step="1"></label>
     <label><span>checkpoint gap g：<output id="g-out">1024</output></span><input id="g-input" type="range" min="1" max="2668" value="1024" step="1"></label>
   </div>
   <div class="status" aria-live="polite">
@@ -243,7 +245,7 @@ function ticks(minLog, maxLog) {
 
 function selectedPoint() {
   const l=Number(lInput.value);
-  const maxG=Math.min(D*l+1,D*(L-l));
+  const maxG=Math.min(D*(L-l)+1,D*l);
   gInput.max=String(maxG);
   if (Number(gInput.value)>maxG) gInput.value=String(maxG);
   return DATA[pointByKey.get(`${l}:${Number(gInput.value)}`)];

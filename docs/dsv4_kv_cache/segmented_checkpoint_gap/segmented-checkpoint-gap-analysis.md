@@ -1,6 +1,6 @@
 # 分段 Token Checkpoint Gap 分析
 
-考虑两段 token checkpoint gap：前 $l$ 层使用 $g_1$，后 $L-l$ 层使用 $g_2$，其中 $g_1\le g_2$，但不要求 $g_2$ 是 $g_1$ 的整数倍。计算量按 hidden-state token-layer 单元计。
+考虑两段 token checkpoint gap。层号从输入侧向输出侧递增：Layer $1$ 是最浅层，Layer $L$ 是最深层。分割位置为 $l$；远离输出端的 Layer $1,\dots,l$ 使用较大的 gap $g_2$，靠近输出端的 Layer $l+1,\dots,L$ 使用较小的 gap $g_1$，其中 $g_1\le g_2$，但不要求 $g_2$ 是 $g_1$ 的整数倍。因此 $l$ 越大，分割位置越深、越靠近输出侧；输出侧 $g_1$ 段的层数为 $L-l$。计算量按 hidden-state token-layer 单元计。
 
 基于本文固定 $N$ 离散公式的参数搜索、Pareto 数据和图表见 [`g1-g2-checkpoint-pareto.md`](./g1-g2-checkpoint-pareto.md)。
 
@@ -35,121 +35,127 @@ T_h(r)=m_h(r)r-d\frac{m_h(r)(m_h(r)+1)}2.
 }
 $$
 
-### 1.1 第一段
+### 1.1 输出侧 $g_1$ 段（恢复时先经过）
 
-令当前位置 $N$ 相对 $g_1$ checkpoint 网格的相位为
+恢复依赖从输出侧向输入侧回溯，所以首先经过使用 $g_1$ 的深层段。记该段高度
+
+$$
+h=L-l,
+$$
+
+并令当前位置 $N$ 相对 $g_1$ checkpoint 网格的相位为
 
 $$
 r_1=N\bmod g_1.
 $$
 
-经过第 $j$ 层后，边界最多扩展 $jd$，但到达最近的 $g_1$ checkpoint 后停止，所以该层的恢复宽度是 $\min(r_1,jd)$。第一段计算量为
+从最深层向浅层回溯 $j$ 层后，边界最多扩展 $jd$，但到达最近的 $g_1$ checkpoint 后停止，所以该层的恢复宽度是 $\min(r_1,jd)$。输出侧段计算量为
 
 $$
 \boxed{
 C_1(N)
-=\sum_{j=1}^{l}\min(r_1,jd)
-=lr_1-T_l(r_1).
+=\sum_{j=1}^{h}\min(r_1,jd)
+=hr_1-T_h(r_1).
 }
 $$
 
-第一段结束时的边界位置为
+输出侧段结束、进入浅层段时的边界位置为
 
 $$
 \boxed{
-b_1=N-\min(r_1,ld).
+b_1=N-\min(r_1,hd).
 }
 $$
 
-其中 $r_1\le ld$ 表示边界命中 $g_1$ checkpoint；若 $r_1>ld$，则边界只到达 $N-ld$，并且
+其中 $r_1\le hd$ 表示边界命中 $g_1$ checkpoint；若 $r_1>hd$，则边界只到达 $N-hd$，并且
 
 $$
-C_1(N)=d\frac{l(l+1)}2.
+C_1(N)=d\frac{h(h+1)}2.
 $$
 
-### 1.2 第二段
+### 1.2 输入侧 $g_2$ 段（恢复时后经过）
 
-第二段的进入相位必须由第一段结束边界计算：
+输入侧段的进入相位必须由输出侧段的结束边界计算：
 
 $$
 \boxed{
 r_2=b_1\bmod g_2
-=\left[N-\min(N\bmod g_1,ld)\right]\bmod g_2.
+=\left[N-\min(N\bmod g_1,(L-l)d)\right]\bmod g_2.
 }
 $$
 
-第二段相对最近 $g_2$ checkpoint 的基准恢复长度为
+输入侧段相对最近 $g_2$ checkpoint 的基准恢复长度为
 
 $$
 \boxed{
 a_2
 =N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2
-=\min(r_1,ld)+r_2.
+=\min(r_1,(L-l)d)+r_2.
 }
 $$
 
-记 $k=L-l$。第二段第 $j$ 层的恢复宽度为
+输入侧段第 $j$ 层的恢复宽度为
 
 $$
 a_2-(r_2-jd)_+.
 $$
 
-因此第二段计算量为
+因此输入侧段计算量为
 
 $$
 \boxed{
 C_2(N)
-=\sum_{j=1}^{k}\left[a_2-(r_2-jd)_+\right]
-=ka_2-T_k(r_2).
+=\sum_{j=1}^{l}\left[a_2-(r_2-jd)_+\right]
+=la_2-T_l(r_2).
 }
 $$
 
-第二段命中 checkpoint 当且仅当 $r_2\le kd$。若 $r_2>kd$，则
+输入侧段命中 checkpoint 当且仅当 $r_2\le ld$。若 $r_2>ld$，则
 
 $$
-C_2(N)=k\min(r_1,ld)+d\frac{k(k+1)}2.
+C_2(N)=l\min(r_1,(L-l)d)+d\frac{l(l+1)}2.
 $$
 
-特别地，$r_2=0$ 时 $C_2=k\min(r_1,ld)$。
+特别地，$r_2=0$ 时 $C_2=l\min(r_1,(L-l)d)$。
 
 ### 1.3 总计算量
 
-给定 $N$ 后依次计算 $r_1,b_1,r_2$，总恢复计算量为
+给定 $N$ 后按恢复方向依次计算 $r_1,b_1,r_2$，总恢复计算量为
 
 $$
 \boxed{
 \begin{aligned}
 r_1&=N\bmod g_1,\\
-b_1&=N-\min(r_1,ld),\\
+b_1&=N-\min(r_1,(L-l)d),\\
 r_2&=b_1\bmod g_2,\\
 C(N,l,g_1,g_2)
-&=lr_1-T_l(r_1)\\
-&\quad +(L-l)\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
--T_{L-l}(r_2).
+&=(L-l)r_1-T_{L-l}(r_1)\\
+&\quad +l\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
+-T_l(r_2).
 \end{aligned}
 }
 $$
 
-这个公式同时覆盖两段命中和未命中的情况，不再需要完整三角形约束。第二段相位 $r_2$ 与 $N$、第一段相位和第一段是否命中共同相关，因此不能分别对两个相位取期望后再代入；对于给定 $N$ 应直接使用上式。
+这个公式同时覆盖两段命中和未命中的情况，不再需要完整三角形约束。输入侧相位 $r_2$ 与 $N$、输出侧相位 $r_1$ 以及输出侧段是否命中共同相关，因此不能分别对两个相位取期望后再代入；对于给定 $N$ 应直接使用上式。
 
 ## 2. $g_1=g,\ g_2=2g$ 的相位平均特例
 
-旧绘图程序额外要求两段都能命中 checkpoint。第一段相位 $r=N\bmod g$ 在 $\{0,1,\dots,g-1\}$ 上均匀分布，因此
+旧绘图程序额外要求两段都能命中 checkpoint。输出侧 $g_1$ 段的相位 $r=N\bmod g$ 在 $\{0,1,\dots,g-1\}$ 上均匀分布，因此
 
 $$
 \boxed{
-\overline C_{\mathrm{low}}
-=\frac{l(g-1)}2
--\frac1g\sum_{r=0}^{g-1}T_l(r).
+\overline C_{\mathrm{near}}
+=\frac{(L-l)(g-1)}2
+-\frac1g\sum_{r=0}^{g-1}T_{L-l}(r).
 }
 $$
 
-第一段命中后，$b_1$ 是 $g$ 的整数倍，其相对 $2g$ 网格的相位只有 $0$ 和 $g$，在一个 $2g$ 周期内各占一半。对给定的 $r$，第二段的基准恢复长度分别为 $r$ 和 $r+g$，因此
+输出侧段命中后，$b_1$ 是 $g$ 的整数倍，其相对 $2g$ 网格的相位只有 $0$ 和 $g$，在一个 $2g$ 周期内各占一半。对给定的 $r$，输入侧段的基准恢复长度分别为 $r$ 和 $r+g$，因此
 
 $$
-C_{\mathrm{high}}^{(0)}(r)=(L-l)r,
+C_{\mathrm{far}}^{(0)}(r)=lr,
 \qquad
-C_{\mathrm{high}}^{(g)}(r)=(L-l)(r+g)-T_{L-l}(g),
+C_{\mathrm{far}}^{(g)}(r)=l(r+g)-T_l(g),
 $$
 
 从而
@@ -157,19 +163,19 @@ $$
 $$
 \boxed{
 \overline C(L,W,l,g)
-=\frac{l(g-1)}2
-+\frac{(L-l)(2g-1)}2
--\frac1g\sum_{r=0}^{g-1}T_l(r)
--\frac{T_{L-l}(g)}2.
+=\frac{(L-l)(g-1)}2
++\frac{l(2g-1)}2
+-\frac1g\sum_{r=0}^{g-1}T_{L-l}(r)
+-\frac{T_l(g)}2.
 }
 $$
 
 旧扫描为了让两个被减去的三角形完整落在各自层段中，限制
 
 $$
-g-1\le l(W-1),
+g-1\le (L-l)(W-1),
 \qquad
-g\le(L-l)(W-1).
+g\le l(W-1).
 $$
 
 其整数参数域为
@@ -179,7 +185,7 @@ $$
 1\le l\le L-1,
 \qquad
 1\le g\le
-\min\{l(W-1)+1,(L-l)(W-1)\}.
+\min\{(L-l)(W-1)+1,l(W-1)\}.
 }
 $$
 
@@ -190,8 +196,8 @@ $$
 $$
 \boxed{
 B(N,l,g_1,g_2)
-=\left\lceil\frac{N}{g_1}\right\rceil\sum_{i=1}^{l}p_i
-+\left\lceil\frac{N}{g_2}\right\rceil\sum_{i=l+1}^{L}p_i.
+=\left\lceil\frac{N}{g_2}\right\rceil\sum_{i=1}^{l}p_i
++\left\lceil\frac{N}{g_1}\right\rceil\sum_{i=l+1}^{L}p_i.
 }
 $$
 
@@ -200,8 +206,8 @@ $$
 $$
 B(N,l,g_1,g_2)
 =p\left[
-l\left\lceil\frac N{g_1}\right\rceil
-+(L-l)\left\lceil\frac N{g_2}\right\rceil
+l\left\lceil\frac N{g_2}\right\rceil
++(L-l)\left\lceil\frac N{g_1}\right\rceil
 \right].
 $$
 
@@ -225,9 +231,9 @@ $$
 
 | 层类型 | 层位置 | 层数 | $p_i$ |
 |---|---|---:|---:|
-| SWA-only | 1–2 | 2 | 74880 B |
-| C4 | 3, 5, ..., 43 | 21 | 157824 B |
-| C128 | 4, 6, ..., 42 | 20 | 600192 B |
+| C4 | 1, 3, ..., 41 | 21 | 157824 B |
+| C128 | 2, 4, ..., 40 | 20 | 600192 B |
+| SWA-only | 42–43（输出侧最深两层） | 2 | 74880 B |
 
 全部 43 层在同一个 token 位置上的 checkpoint 总大小为
 
@@ -235,22 +241,21 @@ $$
 P=15467904\ \text{B}.
 $$
 
-记前 $l$ 层 checkpoint 字节数之和为 $P_l$。当 $l\ge2$ 时：
+记输入侧前 $l$ 层 checkpoint 字节数之和为 $P_l$。当 $1\le l\le41$ 时：
 
 $$
 P_l
-=149760
-+157824\left\lceil\frac{l-2}{2}\right\rceil
-+600192\left\lfloor\frac{l-2}{2}\right\rfloor,
+=157824\left\lceil\frac l2\right\rceil
++600192\left\lfloor\frac l2\right\rfloor.
 $$
 
-而 $P_1=74880$。于是给定 $N,g_1,g_2$ 时，DSV4 Flash 的离散存储量为
+此外 $P_{42}=P_{41}+74880$。于是给定 $N,g_1,g_2$ 时，DSV4 Flash 的离散存储量为
 
 $$
 \boxed{
 B_{\mathrm{DSV4}}(N,l,g_1,g_2)
-=\left\lceil\frac{N}{g_1}\right\rceil P_l
-+\left\lceil\frac{N}{g_2}\right\rceil(P-P_l)\ \text{B}.
+=\left\lceil\frac{N}{g_2}\right\rceil P_l
++\left\lceil\frac{N}{g_1}\right\rceil(P-P_l)\ \text{B}.
 }
 $$
 
@@ -260,8 +265,8 @@ $$
 \boxed{
 B_{\mathrm{DSV4,GiB}}(N,l,g_1,g_2)
 =\frac{
-\left\lceil N/g_1\right\rceil P_l
-+\left\lceil N/g_2\right\rceil(P-P_l)
+\left\lceil N/g_2\right\rceil P_l
++\left\lceil N/g_1\right\rceil(P-P_l)
 }{2^{30}}.
 }
 $$
@@ -272,12 +277,12 @@ $$
 \boxed{
 \begin{aligned}
 r_1&=N\bmod g_1,\\
-b_1&=N-\min(r_1,127l),\\
+b_1&=N-\min(r_1,127(43-l)),\\
 r_2&=b_1\bmod g_2,\\
 C_{\mathrm{DSV4}}(N,l,g_1,g_2)
-&=lr_1-T_l(r_1)\\
-&\quad +(43-l)\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
--T_{43-l}(r_2).
+&=(43-l)r_1-T_{43-l}(r_1)\\
+&\quad +l\left(N-\left\lfloor\frac{b_1}{g_2}\right\rfloor g_2\right)
+-T_l(r_2).
 \end{aligned}
 }
 $$
@@ -289,8 +294,8 @@ $$
 $$
 \boxed{
 B_{\mathrm{DSV4}}(l,g)
-=\left\lceil\frac{10^6}{g}\right\rceil P_l
-+\left\lceil\frac{10^6}{2g}\right\rceil(P-P_l)\ \text{B},
+=\left\lceil\frac{10^6}{2g}\right\rceil P_l
++\left\lceil\frac{10^6}{g}\right\rceil(P-P_l)\ \text{B},
 }
 $$
 
@@ -299,10 +304,10 @@ $$
 $$
 \boxed{
 \overline C_{\mathrm{DSV4}}(l,g)
-=\frac{l(g-1)}{2}
-+\frac{(43-l)(2g-1)}2
--\frac1g\sum_{r=0}^{g-1}T_l(r)
--\frac{T_{43-l}(g)}2.
+=\frac{(43-l)(g-1)}2
++\frac{l(2g-1)}2
+-\frac1g\sum_{r=0}^{g-1}T_{43-l}(r)
+-\frac{T_l(g)}2.
 }
 $$
 
@@ -311,7 +316,7 @@ $$
 $$
 1\le l\le42,
 \qquad
-1\le g\le\min\{127l+1,127(43-l)\}.
+1\le g\le\min\{127(43-l)+1,127l\}.
 $$
 
 $N=10^6$ 只进入该旧扫描的存储公式；相位平均后的计算量不依赖绝对位置 $N$。对于一般的 $g_1,g_2$，应使用前述给定 $N$ 的公式直接计算。

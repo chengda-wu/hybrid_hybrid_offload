@@ -103,16 +103,17 @@ def exact_two_gap_compute(
     g1: int,
     g2: int,
 ) -> float:
+    near_height = L - split
     r1 = ns % g1
-    offset1 = np.minimum(r1, split * D)
+    offset1 = np.minimum(r1, near_height * D)
     boundary1 = ns - offset1
     r2 = boundary1 % g2
     base2 = offset1 + r2
     compute = (
-        split * r1
-        - triangle_removed(r1, split)
-        + (L - split) * base2
-        - triangle_removed(r2, L - split)
+        near_height * r1
+        - triangle_removed(r1, near_height)
+        + split * base2
+        - triangle_removed(r2, split)
     )
     return float(compute.mean())
 
@@ -124,15 +125,16 @@ def verify_equal_gap_reduction(ns: np.ndarray, gaps: list[int]) -> None:
         phases = check_ns % gap
         common_removed = triangle_removed(phases, L)
         for split in range(1, L):
-            offset1 = np.minimum(phases, split * D)
+            near_height = L - split
+            offset1 = np.minimum(phases, near_height * D)
             boundary1 = check_ns - offset1
             r2 = boundary1 % gap
             base2 = offset1 + r2
             direct = (
-                split * phases
-                - triangle_removed(phases, split)
-                + (L - split) * base2
-                - triangle_removed(r2, L - split)
+                near_height * phases
+                - triangle_removed(phases, near_height)
+                + split * base2
+                - triangle_removed(r2, split)
             )
             reduced = L * phases - common_removed
             if not np.array_equal(direct, reduced):
@@ -501,6 +503,11 @@ def main() -> None:
     total_seconds = perf_counter() - started
     metadata: dict[str, object] = {
         "model": published_metadata["model"],
+        "layer_order": published_metadata["layer_order"],
+        "split_definition": published_metadata["split_definition"],
+        "split_depth": published_metadata["split_depth"],
+        "g1_side": published_metadata["g1_side"],
+        "g2_side": published_metadata["g2_side"],
         "N_min": args.n_min,
         "N_max": args.n_max,
         "random_seed": args.seed,

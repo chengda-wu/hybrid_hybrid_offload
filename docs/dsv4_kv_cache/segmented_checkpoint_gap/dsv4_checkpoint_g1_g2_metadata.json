@@ -62,7 +62,7 @@
       "recovery_token_layers": 78383.50701904297,
       "g1": 5150,
       "g2": 7725,
-      "l": 37
+      "l": 6
     },
     {
       "storage_limit_gib": 8,
@@ -70,7 +70,7 @@
       "recovery_token_layers": 47087.76071166992,
       "g1": 2466,
       "g2": 7398,
-      "l": 37
+      "l": 6
     },
     {
       "storage_limit_gib": 16,
@@ -78,7 +78,7 @@
       "recovery_token_layers": 26129.159057617188,
       "g1": 1264,
       "g2": 3792,
-      "l": 39
+      "l": 4
     },
     {
       "storage_limit_gib": 32,
@@ -86,7 +86,7 @@
       "recovery_token_layers": 13835.41098022461,
       "g1": 647,
       "g2": 4602,
-      "l": 41
+      "l": 2
     },
     {
       "storage_limit_gib": 64,
@@ -94,7 +94,7 @@
       "recovery_token_layers": 7119.749267578125,
       "g1": 171,
       "g2": 342,
-      "l": 2
+      "l": 41
     },
     {
       "storage_limit_gib": 128,
@@ -102,7 +102,7 @@
       "recovery_token_layers": 3576.193328857422,
       "g1": 87,
       "g2": 174,
-      "l": 3
+      "l": 40
     },
     {
       "storage_limit_gib": 256,
@@ -110,7 +110,7 @@
       "recovery_token_layers": 1777.9111633300781,
       "g1": 43,
       "g2": 86,
-      "l": 2
+      "l": 41
     },
     {
       "storage_limit_gib": 512,
@@ -118,7 +118,7 @@
       "recovery_token_layers": 891.8812561035156,
       "g1": 22,
       "g2": 44,
-      "l": 3
+      "l": 40
     },
     {
       "storage_limit_gib": 1024,
@@ -126,7 +126,12 @@
       "recovery_token_layers": 434.2855529785156,
       "g1": 11,
       "g2": 22,
-      "l": 3
+      "l": 40
     }
-  ]
+  ],
+  "layer_order": "input_to_output",
+  "split_definition": "layers_1_through_l_use_g2; layers_l_plus_1_through_L_use_g1",
+  "split_depth": "larger_l_is_deeper_and_closer_to_output",
+  "g1_side": "near_output",
+  "g2_side": "far_from_output"
 }
