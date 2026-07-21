@@ -27,11 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import perf_counter
 
-import matplotlib
 import numpy as np
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 
 L = 43
@@ -410,6 +406,11 @@ def write_csv(path: Path, frontier: np.ndarray) -> None:
 def write_plot(
     path: Path, frontier: np.ndarray, cloud: np.ndarray, sample_count: int
 ) -> None:
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered = frontier[np.argsort(frontier[:, 0])]
     fig, ax = plt.subplots(figsize=(10, 7), dpi=240)
@@ -461,6 +462,7 @@ def write_plot(
 
 
 FRAGMENT_TEMPLATE = r"""<div id="dsv4-g1-g2-pareto" class="viz-root">
+  <h2 id="dsv4-original-title" class="dsv4-chart-title">双 gap Pareto 前沿（g₁ ≤ g₂）</h2>
   <div class="viz-controls">
     <label class="form-label" for="dsv4-l-input">浅层数 l：<output id="dsv4-l-out">42</output>
       <input class="form-range" id="dsv4-l-input" type="range" min="1" max="42" value="42" step="1">
@@ -486,6 +488,7 @@ FRAGMENT_TEMPLATE = r"""<div id="dsv4-g1-g2-pareto" class="viz-root">
 </div>
 <style>
 #dsv4-g1-g2-pareto { width: 100%; color: var(--foreground); }
+#dsv4-g1-g2-pareto .dsv4-chart-title { margin-bottom: 12px; }
 #dsv4-g1-g2-pareto .dsv4-plot { position: relative; width: 100%; }
 #dsv4-g1-g2-pareto canvas { display: block; width: 100%; height: 650px; }
 #dsv4-g1-g2-pareto .tooltip { display: none; position: absolute; pointer-events: none; max-width: 280px; }
