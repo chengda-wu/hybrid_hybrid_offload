@@ -141,12 +141,9 @@ class SimulatorScheduler:
 
         # 4. Record per-step metrics (skip warmup steps).
         if self._step > self._warmup:
-            active_count = sum(1 for r in self._running.values() if not r.is_finished)
             self._recorder.record_step(
-                step=self._step,
                 sim_time=self._sim_time,
                 step_latency=step_latency,
-                num_running=active_count,
                 num_waiting=len(self._waiting),
                 cache_usage=self._backend.usage,
                 loaded_tokens=total_loaded,
@@ -206,7 +203,6 @@ class SimulatorScheduler:
             )
 
         req.num_computed_tokens = req.num_tokens
-        req.num_prefill_tokens = num_new_tokens
 
         # Insert prefill tokens into radix tree (SGLang: cache_unfinished_req)
         backend.sync_state(req.backend_req, [])
@@ -355,7 +351,6 @@ class SimulatorScheduler:
         # Only real rejections count toward the acceptance-rate metric;
         # drafts truncated by end-of-ground-truth are not "rejected".
         req.num_rejected_spec_tokens += num_rejected
-        req.num_decode_steps += 1
 
         # TTFT is stamped by step() after step_latency is added to sim_time,
         # so it includes the decode cost of producing the first token.

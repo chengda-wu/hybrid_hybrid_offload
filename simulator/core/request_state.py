@@ -47,8 +47,6 @@ class SimRequestState:
 
     # ---- Counters for metrics ----
 
-    num_prefill_tokens: int = 0
-    num_decode_steps: int = 0
     num_accepted_spec_tokens: int = 0
     num_rejected_spec_tokens: int = 0
     num_cache_hits_on_prefill: int = 0

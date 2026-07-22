@@ -719,6 +719,38 @@ class TestDeadConfigFieldsRemoved(unittest.TestCase):
         names = {f.name for f in dataclasses.fields(SimRequestState)}
         self.assertNotIn("finish_time", names)
 
+    def test_dead_metric_counters_removed(self):
+        # num_prefill_tokens / num_decode_steps (SimRequestState) and
+        # num_decode_steps (RequestRecord) were written but never read —
+        # stats.py never consumed them and asdict() serializes only
+        # SimulationReport, so they never reached JSON either.
+        import dataclasses
+        from simulator.core.request_state import SimRequestState
+        from simulator.metrics.recorder import RequestRecord
+
+        req_names = {f.name for f in dataclasses.fields(SimRequestState)}
+        self.assertNotIn("num_prefill_tokens", req_names)
+        self.assertNotIn("num_decode_steps", req_names)
+        rec_names = {f.name for f in dataclasses.fields(RequestRecord)}
+        self.assertNotIn("num_decode_steps", rec_names)
+
+    def test_dead_step_record_fields_removed(self):
+        # StepRecord.step / num_running were recorded every post-warmup step
+        # but never read (stats.py reads num_waiting, not num_running; step
+        # was never consumed).  Their sole consumer was the record_step call,
+        # so the params went with them.
+        import dataclasses
+        import inspect
+        from simulator.metrics.recorder import MetricsRecorder, StepRecord
+
+        names = {f.name for f in dataclasses.fields(StepRecord)}
+        self.assertNotIn("step", names)
+        self.assertNotIn("num_running", names)
+
+        params = inspect.signature(MetricsRecorder.record_step).parameters
+        self.assertNotIn("step", params)
+        self.assertNotIn("num_running", params)
+
 
 if __name__ == "__main__":
     unittest.main()

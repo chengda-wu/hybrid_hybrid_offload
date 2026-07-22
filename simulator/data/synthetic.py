@@ -30,16 +30,29 @@ class SyntheticDataGenerator:
 
     The first request establishes a shared prefix. Subsequent requests
     reuse ``shared_prefix_ratio * prompt_len`` tokens from it.
+
+    Token content/length and arrival times draw from **independent** RNGs
+    (``_rng`` and ``_arrival_rng``).  This decouples the workload (prompts,
+    outputs, shared-prefix tokens — which drive cache-hit rate) from the
+    arrival pattern, so cross-``arrival_pattern`` comparisons keep the
+    workload fixed: switching poisson↔staggered↔burst no longer perturbs
+    the token stream (the poisson ``expovariate`` draws used to shift every
+    downstream request's tokens, confounding cache-hit-rate experiments).
     """
 
     # Token ID range for synthetic data (roughly LLaMA vocabulary size).
     VOCAB_SIZE = 128256
+
+    # Salt for the arrival-time RNG so it diverges from the token RNG while
+    # staying a deterministic function of the user's seed.
+    _ARRIVAL_SALT = 0x9E3779B1
 
     def __init__(self, config: SyntheticConfig, seed: int = 42,
                  arrival_config=None):
         self._config = config
         self._arrival = arrival_config
         self._rng = random.Random(seed)
+        self._arrival_rng = random.Random(seed ^ self._ARRIVAL_SALT)
         self._shared_prefix: list[int] | None = None
         self._next_arrival: float = 0.0
 
@@ -137,7 +150,7 @@ class SyntheticDataGenerator:
             # Exponential inter-arrival: mean = 1000/rate ms.
             # _next_arrival starts at 0.0 (set in __init__), so the first
             # request (index 0) returns 0.0 above; subsequent ones accumulate.
-            gap = self._rng.expovariate(self._arrival.poisson_rate)
+            gap = self._arrival_rng.expovariate(self._arrival.poisson_rate)
             self._next_arrival += gap * 1000.0  # seconds → ms
             return self._next_arrival
         else:  # staggered

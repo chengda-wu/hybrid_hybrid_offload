@@ -11,10 +11,8 @@ from simulator.core.request_state import SimRequestState
 class StepRecord:
     """Metrics for one scheduler step."""
 
-    step: int
     sim_time_ms: float
     step_latency_ms: float
-    num_running: int            # active requests in this step
     num_waiting: int            # waiting queue length
     cache_usage: float          # KV cache utilization [0, 1]
     total_loaded_tokens: int    # sum of cache-hit tokens across all requests
@@ -37,7 +35,6 @@ class RequestRecord:
 
     # Token counts
     cache_hit_tokens_prefill: int  # prefix-cache hit at prefill
-    num_decode_steps: int
     num_accepted_spec_tokens: int
     num_rejected_spec_tokens: int
 
@@ -50,10 +47,8 @@ class MetricsRecorder:
         self.requests: list[RequestRecord] = []
     def record_step(
         self,
-        step: int,
         sim_time: float,
         step_latency: float,
-        num_running: int,
         num_waiting: int,
         cache_usage: float,
         loaded_tokens: int,
@@ -63,10 +58,8 @@ class MetricsRecorder:
     ) -> None:
         self.steps.append(
             StepRecord(
-                step=step,
                 sim_time_ms=sim_time,
                 step_latency_ms=step_latency,
-                num_running=num_running,
                 num_waiting=num_waiting,
                 cache_usage=cache_usage,
                 total_loaded_tokens=loaded_tokens,
@@ -90,7 +83,6 @@ class MetricsRecorder:
                 ttft_ms=ttft,
                 total_latency_ms=sim_time - req.arrival_time,
                 cache_hit_tokens_prefill=req.num_cache_hits_on_prefill,
-                num_decode_steps=req.num_decode_steps,
                 num_accepted_spec_tokens=req.num_accepted_spec_tokens,
                 num_rejected_spec_tokens=req.num_rejected_spec_tokens,
             )
