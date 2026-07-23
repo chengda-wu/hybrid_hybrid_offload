@@ -72,6 +72,13 @@ class SimulatorScheduler:
         # 2. Process each active request; accumulate step-level counters
         total_loaded = 0
         total_computed = 0
+        total_interaction = 0  # Σ(loaded_i * computed_i) — the additively-
+                               # correct batch interaction mass.  Passing this
+                               # (NOT total_loaded * total_computed) to the GPU
+                               # model avoids phantom cross-request terms:
+                               # request i's new tokens never attend request j's
+                               # cache, so (Σloaded)·(Σcomputed) would blow up
+                               # as O(N²).  See GPUPerfModel.predict.
         total_accepted = 0
         total_generated = 0  # output tokens actually produced this step
                               # (bonus + accepted spec); for throughput, this
@@ -97,6 +104,7 @@ class SimulatorScheduler:
 
             total_loaded += loaded
             total_computed += computed
+            total_interaction += loaded * computed
             total_accepted += accepted
             total_generated += generated
 
@@ -109,7 +117,9 @@ class SimulatorScheduler:
         # 3. Simulate GPU latency for this step (aggregate over batch)
         step_latency = 0.0
         if total_computed > 0:
-            step_latency = self._gpu_perf.predict(total_loaded, total_computed)
+            step_latency = self._gpu_perf.predict(
+                total_loaded, total_computed, total_interaction
+            )
         self._sim_time += step_latency
 
         # TTFT includes this step's decode latency (the cost of producing

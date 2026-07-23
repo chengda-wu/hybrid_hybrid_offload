@@ -2,7 +2,12 @@
 
 Model:
     latency_ms = a * loaded_tokens + b * computed_tokens
-               + c * loaded_tokens * computed_tokens + d
+               + c * interaction_tokens + d
+
+where ``interaction_tokens`` is the per-request interaction mass.  For a
+single request this is ``loaded * computed``; for a batch it is
+``Σ(loaded_i * computed_i)`` (NOT ``(Σloaded) * (Σcomputed)``).  See
+``predict`` for why.
 
 Coefficients are fitted from user-provided (loaded, computed, latency) data
 points using least squares.  Reasonable H100-like defaults are provided.
@@ -31,18 +36,20 @@ class GPUPerfModel:
     - Interaction between cached and new tokens
 
     Per-step latency is capped at ``MAX_STEP_LATENCY_MS``: a single GPU
-    forward pass on one device has a physical ceiling, and the interaction
-    term ``c·m·n`` grows without bound as loaded×computed scales up under
-    high concurrency.  Without a cap, a large batch triggers a positive
-    feedback loop (slow step → queue grows → bigger batch → even slower
-    step) that snowballs wall-clock time.  The cap models the real-world
-    fact that a single forward cannot run arbitrarily long — the scheduler
-    would chunk it or the GPU would hit a fixed compute bound — and keeps
-    the simulation tractable for long-sequence / high-concurrency workloads.
+    forward pass on one device has a physical ceiling.  The cap is a safety
+    net for inputs far outside the training envelope, NOT a load-bearing
+    control on batch scaling — the interaction term is now additively
+    decomposed per-request (see ``predict``), so a batch no longer snowballs
+    as ``(Σloaded)·(Σcomputed)``.  The cap must sit above the largest
+    training-point latency so the model can reproduce its own training data;
+    raising it is safe precisely because the per-request decomposition
+    removed the old O(N²) blow-up.
     """
 
-    # Ceiling on a single step's predicted latency (ms).  See class docstring.
-    MAX_STEP_LATENCY_MS: float = 50.0
+    # Ceiling on a single step's predicted latency (ms).  Must be ≥ the
+    # largest DEFAULT_DATA latency (130 ms) so the cap does not eat the
+    # model's own training points.  See class docstring.
+    MAX_STEP_LATENCY_MS: float = 200.0
 
     DEFAULT_DATA: list[PerfDataPoint] = [
         PerfDataPoint(0, 1, 0.8),         # single token decode, no cache
@@ -188,39 +195,56 @@ class GPUPerfModel:
 
         self._fitted = True
 
-    def predict(self, loaded_tokens: int, computed_tokens: int) -> float:
+    def predict(
+        self,
+        loaded_tokens: int,
+        computed_tokens: int,
+        interaction_tokens: int | None = None,
+    ) -> float:
         """Predict latency in milliseconds for a forward pass.
 
         Args:
-            loaded_tokens: Total tokens already cached (attention query context).
-            computed_tokens: New tokens to compute in this forward.
+            loaded_tokens: Total tokens already cached (Σ over the batch).
+            computed_tokens: New tokens to compute in this forward (Σ over batch).
+            interaction_tokens: Per-request interaction mass Σ(loaded_i *
+                computed_i).  Defaults to ``loaded_tokens * computed_tokens``,
+                which is correct for a single request.  Callers batching
+                multiple requests MUST pass the per-request sum — multiplying
+                the *batch totals* ``(Σloaded)·(Σcomputed)`` introduces
+                phantom cross-request terms (request i's new tokens never
+                attend request j's cache) and blows up as O(N²).  The
+                per-request sum is the additively-correct decomposition: it
+                equals ``loaded*computed`` for one request and grows linearly
+                with batch size for identical requests.
         """
         assert self._fitted, "Model not fitted"
+        if interaction_tokens is None:
+            interaction_tokens = loaded_tokens * computed_tokens
         # Warn (once) on extrapolation far outside the training envelope.  The
-        # interaction term c·m·n grows unboundedly, so a prediction for e.g.
-        # loaded=50000 (training max 8000) is detached from reality — even
-        # after the 50ms cap the capped value carries no information.  Surface
+        # interaction term grows unboundedly, so a prediction for e.g.
+        # loaded=50000 (training max 8000) is detached from reality.  Surface
         # this so the user knows to add data points or interpret with caution.
         if not self._warned_extrapolation and (
             loaded_tokens > 2 * self._max_loaded
             or computed_tokens > 2 * self._max_computed
+            or interaction_tokens > 2 * self._max_loaded * self._max_computed
         ) and (self._max_loaded > 0 or self._max_computed > 0):
             import logging
             _log = logging.getLogger(__name__)
             _log.warning(
-                "GPU perf model input loaded=%d computed=%d is far outside the "
-                "training envelope (max loaded=%d, max computed=%d) — prediction "
-                "is an extrapolation and (after the 50ms cap) may not reflect "
-                "real latency.  Add data points covering this range or interpret "
-                "with caution.  (This warning is printed once.)",
-                loaded_tokens, computed_tokens,
+                "GPU perf model input loaded=%d computed=%d interaction=%d is "
+                "far outside the training envelope (max loaded=%d, max "
+                "computed=%d) — prediction is an extrapolation and may not "
+                "reflect real latency.  Add data points covering this range or "
+                "interpret with caution.  (This warning is printed once.)",
+                loaded_tokens, computed_tokens, interaction_tokens,
                 self._max_loaded, self._max_computed,
             )
             self._warned_extrapolation = True
         latency = (
             self._a * loaded_tokens
             + self._b * computed_tokens
-            + self._c * loaded_tokens * computed_tokens
+            + self._c * interaction_tokens
             + self._d
         )
         if latency > self.MAX_STEP_LATENCY_MS:
@@ -232,12 +256,13 @@ class GPUPerfModel:
                 _log = logging.getLogger(__name__)
                 _log.warning(
                     "GPU perf model predicted latency %.2f ms (> cap %.1f ms) "
-                    "for loaded=%d computed=%d — clamped to cap.  The interaction "
-                    "term c·m·n grows unboundedly at scale; the cap models the "
-                    "physical ceiling of a single GPU forward pass.  (Further "
-                    "clamps are counted silently; final count reported at end.)",
+                    "for loaded=%d computed=%d interaction=%d — clamped to cap.  "
+                    "The cap is a safety net for inputs far outside the training "
+                    "envelope, modeling the physical ceiling of a single GPU "
+                    "forward pass.  (Further clamps are counted silently; final "
+                    "count reported at end.)",
                     latency, self.MAX_STEP_LATENCY_MS,
-                    loaded_tokens, computed_tokens,
+                    loaded_tokens, computed_tokens, interaction_tokens,
                 )
                 self._warned_cap = True
             latency = self.MAX_STEP_LATENCY_MS

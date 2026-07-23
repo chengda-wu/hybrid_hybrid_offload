@@ -103,7 +103,8 @@ class _CapturingPerfModel(GPUPerfModel):
         super().__init__(GPUPerfConfig())
         self.calls: list[tuple[int, int]] = []
 
-    def predict(self, loaded_tokens, computed_tokens):  # type: ignore[override]
+    def predict(self, loaded_tokens, computed_tokens,
+                interaction_tokens=None):  # type: ignore[override]
         self.calls.append((loaded_tokens, computed_tokens))
         return 1.0  # constant latency so the loop progresses
 

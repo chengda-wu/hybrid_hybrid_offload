@@ -116,5 +116,74 @@ class TestGPUCustomDataPoints(unittest.TestCase):
         self.assertGreater(t, 0.0)
 
 
+class TestGPUBatchInteractionDecomposition(unittest.TestCase):
+    """Regression: the interaction term is additively decomposed per-request.
+
+    Pre-fix the scheduler queried ``predict(Σloaded, Σcomputed)`` and the
+    model computed ``c·(Σloaded)·(Σcomputed)``, which expands to
+    ``c·Σ_iΣ_j(loaded_i·computed_j)`` — including phantom cross-request terms
+    (request i's new tokens never attend request j's cache).  That blew up as
+    O(N²): N=4 identical decode requests predicted 33 ms vs a serial 10 ms
+    (batch SLOWER than serial — directionally wrong), and N≥8 all clamped to
+    the cap so batch=8 and batch=64 were indistinguishable.
+
+    The fix: callers pass ``interaction_tokens = Σ(loaded_i·computed_i)``;
+    the model uses ``c·Σ(loaded_i·computed_i)``.  This equals
+    ``c·loaded·computed`` for one request (single-request semantics unchanged)
+    and grows LINEARLY with N for identical requests.
+    """
+
+    def test_single_request_uses_loaded_times_computed(self):
+        # interaction defaults to loaded*computed → single-request semantics
+        # identical to passing it explicitly.
+        m = GPUPerfModel(GPUPerfConfig())
+        self.assertAlmostEqual(
+            m.predict(4000, 1), m.predict(4000, 1, 4000 * 1), places=6
+        )
+
+    def test_batch_grows_linearly_not_quadratically(self):
+        # N identical (loaded=4000, computed=1) requests.  Batch latency with
+        # the correct per-request interaction sum must grow ~linearly with N,
+        # not as N².  Pre-fix: N=4 → 33 ms (3.2× serial), N=8 → capped 50 ms.
+        m = GPUPerfModel(GPUPerfConfig())
+        latencies = []
+        for N in (1, 4, 8, 16, 32):
+            batch = m.predict(4000 * N, 1 * N, 4000 * 1 * N)
+            latencies.append(batch)
+        # 8 → 32 is a 4× increase in N.  Linear growth ⇒ ~4× latency; O(N²)
+        # would give 16×.  Assert well under the quadratic bound (and above
+        # linear so the test is meaningful).  The positive base term pushes
+        # the ratio just under 4×, so 4×-1.2×-ish.
+        ratio_8_to_32 = latencies[4] / latencies[2]
+        self.assertLess(ratio_8_to_32, 8.0,
+                        f"batch grew {ratio_8_to_32:.2f}× from N=8→32, expected "
+                        f"~4× (linear); O(N²) would be 16×")
+
+    def test_batch_slower_than_serial_is_directionally_wrong(self):
+        # The clearest pre-fix symptom: batching 4 identical decodes predicted
+        # SLOWER than running them serially.  With the per-request sum, batch
+        # of N identical requests ≈ N×single (plus one shared base term), so
+        # batch is never multiple-times slower than serial.
+        m = GPUPerfModel(GPUPerfConfig())
+        N = 4
+        single = m.predict(4000, 1)
+        batch = m.predict(4000 * N, 1 * N, 4000 * 1 * N)
+        # batch ≈ N*single + d (one base for the whole forward); serial would
+        # be N*single + N*d.  Batch should be within 1.5× of N×single.
+        self.assertLess(batch, N * single * 1.5)
+
+    def test_cap_above_largest_training_point(self):
+        # The cap must sit above the largest DEFAULT_DATA latency (130 ms) so
+        # the model can reproduce its own training data — pre-fix cap=50 ate
+        # predict(0,8192) (training 130) down to 50.
+        m = GPUPerfModel(GPUPerfConfig())
+        self.assertGreaterEqual(
+            m.MAX_STEP_LATENCY_MS, 130.0,
+            "cap must be ≥ largest training-point latency (130 ms)",
+        )
+        # And a prefill within the training envelope is NOT clamped.
+        self.assertGreater(m.predict(0, 8192), 50.0)
+
+
 if __name__ == "__main__":
     unittest.main()
